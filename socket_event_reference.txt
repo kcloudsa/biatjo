@@ -1,0 +1,109 @@
+SOCKET EVENT REFERENCE
+
+🔐 User Identification
+Event: user:identify
+Payload: { userId: string, role: 'driver' | 'rider' }
+Response: { success: true/false, error? }
+Notes: Stores authenticated role in socket.data and joins drivers_online if role = driver
+
+------------------------------------------------------------
+
+🚖 Driver Events
+
+Event: driver:online
+Payload: { driverId, lat, lng }
+Response (callback): { success, driver?, error? }
+Emits: io.emit('driver:online', { driverId })
+Notes: Marks driver as online, updates location, joins driver:<driverId> room
+
+Event: driver:location
+Payload: { driverId, lat, lng }
+Response (callback): { success, driver?, error? }
+Emits: io.to('trip:<tripId>').emit('driver:location:update', { driverId, lat, lng })
+Notes: Live location updates inside trip room
+
+------------------------------------------------------------
+
+🧍 Rider Events
+
+Event: rider:ping
+Payload: anything
+Emits: rider:pong back to same socket
+Notes: Test connection
+
+Event: rider:request_trip
+Payload: { riderId, pickup:{lat,lng}, dropoff:{lat,lng}, initialFare? }
+Emits:
+ - io.emit('trip:new', {...})
+ - io.emit('rider:request_trip', {...})
+Response: { success, trip, ...payload }
+Notes: Trip creation, auto join room trip:<tripId>, driver search
+
+------------------------------------------------------------
+
+📍 Trip Events
+
+Event: trip:join
+Payload: { tripId, userId, role }
+Notes: Only allowed if socket identified, joins trip room
+
+Event: trip:accept
+Payload: { tripId, driverId, riderId }
+Response: { success, trip?, error? }
+Emits: io.to('trip:<tripId>').emit('trip:accepted', {...})
+Notes: Driver joins trip room
+
+Event: trip:location
+Payload: { driverId, tripId, lat, lng }
+Response (callback): { success, driver?, error? }
+Emits: io.to('trip:<tripId>').emit('trip:location:update', { driverId, lat, lng })
+Notes: Live location updates inside trip room
+
+
+Event: trip:update
+Payload: { tripId, status }
+Response: { success, trip?, error? }
+Emits: io.to('trip:<tripId>').emit('trip:update', {...})
+Notes: Status sync inside trip room
+
+Event: trip:completed
+Payload: { tripId, fare }
+Response: { success, trip?, error? }
+Emits: io.to('trip:<tripId>').emit('trip:completed', {...})
+Notes: Trip marked complete
+
+Event: trip:negotiate
+Payload: { tripId, from:'driver'|'rider', amount,userId,status }
+Response: { success, trip?, error? }
+Emits: io.to('trip:<tripId>').emit('trip:negotiation:update', {...})
+Notes: Negotiation with max attempt limit
+
+------------------------------------------------------------
+
+🏷 Socket Rooms Used
+
+Room: drivers_online → All active drivers
+Room: driver:<driverId> → Individual driver
+Room: trip:<tripId> → Vehicle + Rider trip communication
+
+------------------------------------------------------------
+
+🔥 Server → Client Events Emitted
+
+driver:online → Everyone
+driver:location:update → Trip room only
+trip:new → All drivers
+rider:request_trip → All drivers
+trip:accepted → Trip room
+trip:update → Trip room
+trip:completed → Trip room
+trip:negotiation:update → Trip room
+rider:pong → Same rider socket
+
+------------------------------------------------------------
+
+Usage Flow:
+1) user:identify
+2) driver:online / rider:request_trip
+3) trip:join (auto for rider)
+4) trip:accept → trip:update → trip:completed
