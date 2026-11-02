@@ -67,11 +67,15 @@ Base path: `/auth`
 
 - POST `/forgot-password`
   - Body: `{ email }`
-  - Action: sends OTP email (basic flow, optional)
+  - Action: creates and sends a 6-digit reset OTP with a 10-minute expiry
+
+- POST `/password-reset/check-otp`
+  - Body: `{ email, otp }`
+  - Action: validates the reset OTP and expiry without consuming the OTP; invalid attempts count toward the five-attempt lockout
 
 - POST `/reset-password`
   - Body: `{ email, otp, newPassword }`
-  - Action: validates OTP (stub), updates password, sends change notification
+  - Action: validates OTP and expiry, updates the password, clears reset state, and sends a change notification
 
 - POST `/password-reset/request`
   - Body: `{ email }`

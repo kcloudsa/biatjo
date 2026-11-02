@@ -15,7 +15,7 @@ Authentication uses `Authorization: Bearer <JWT>` where marked as required. Trip
 
 ## Authentication
 
-Available under both `/auth` and `/api/auth`: register, driver registration, OTP registration/verification, login, dashboard login, refresh, logout, forgot/reset password, password-reset request/validate/complete, current user, and Google OAuth start/callback.
+Available under both `/auth` and `/api/auth`: register, driver registration, OTP registration/verification, login, dashboard login, refresh, logout, forgot/reset password, password-reset OTP check, password-reset request/validate/complete, current user, and Google OAuth start/callback.
 
 ## User, key, search, and analytics actions
 

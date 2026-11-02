@@ -13,6 +13,7 @@ import {
   otpRegisterHandler,
   otpVerifyHandler,
   forgotPasswordHandler,
+  passwordResetOtpCheckHandler,
   resetPasswordHandler,
   passwordResetRequestHandler,
   passwordResetValidateHandler,
@@ -40,6 +41,7 @@ router.post('/registerDriver', registerDriverHandler);
 router.post('/otp/register', otpRegisterHandler);
 router.post('/otp/verify', otpVerifyHandler);
 router.post('/forgot-password', forgotPasswordHandler);
+router.post('/password-reset/check-otp', passwordResetOtpCheckHandler);
 router.post('/reset-password', resetPasswordHandler);
 router.post('/password-reset/request', passwordResetRequestHandler);
 router.post('/password-reset/validate', passwordResetValidateHandler);

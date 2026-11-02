@@ -38,6 +38,7 @@ This module provides the authentication layer for the Byatjo API. It handles reg
 | POST | `/auth/otp/register` | No | Send a verification OTP for a registered email |
 | POST | `/auth/otp/verify` | No | Verify a one-time password |
 | POST | `/auth/forgot-password` | No | Request password reset flow |
+| POST | `/auth/password-reset/check-otp` | No | Check a password-reset OTP without changing the password |
 | POST | `/auth/reset-password` | No | Reset password using existing flow |
 | POST | `/auth/password-reset/request` | No | Request a reset token |
 | POST | `/auth/password-reset/validate` | No | Validate a reset token |
@@ -64,9 +65,11 @@ SESSION_SECRET=your_session_secret
 AUTH_GOOGLE_ID=your_google_client_id
 AUTH_GOOGLE_SECRET=your_google_client_secret
 FRONTEND_URL=http://localhost:5173
+RESEND_API_KEY=re_your_api_key
+EMAIL_FROM=Byatjo <no-reply@your-verified-domain.com>
 ```
 
-For local development, store these in a root `.env` file.
+For local development, store these in a root `.env` file. In production (including Railway), set `RESEND_API_KEY` and `EMAIL_FROM` as service variables and verify the sender domain with Resend. The app uses Resend over HTTPS when configured, which avoids SMTP port/connectivity timeouts. Gmail SMTP remains available with `EMAIL_USER` and `EMAIL_PASS` if Resend is not configured.
 
 ## Quick start
 
@@ -110,13 +113,14 @@ Example response:
 ```json
 {
   "success": true,
-  "message": "User created successfully",
+  "message": "User created successfully. Please check your email for a verification code.",
   "data": {
     "userId": "U123456",
     "email": "ahmed@example.com",
     "displayName": "A.",
     "refreshToken": "refresh-token-value",
-    "token": "access-token-value"
+    "token": "access-token-value",
+    "expiresAt": "2026-11-02T09:40:00.000Z"
   }
 }
 ```
@@ -255,6 +259,28 @@ curl -X POST http://localhost:3001/auth/reset-password \
     "newPassword": "NewSecurePassword123!"
   }'
 ```
+
+Optionally check the OTP before submitting the new password:
+
+```bash
+curl -X POST http://localhost:3001/auth/password-reset/check-otp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "ahmed@example.com",
+    "otp": "123456"
+  }'
+```
+
+Successful check response:
+
+```json
+{
+  "success": true,
+  "message": "Reset code is valid"
+}
+```
+
+The check does not consume the OTP. Submit the same code to `/auth/reset-password` to complete the reset. Invalid/expired checks count toward the five-attempt limit; after five attempts, requests are locked for 15 minutes.
 
 Example response:
 

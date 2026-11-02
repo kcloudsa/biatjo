@@ -57,7 +57,11 @@ SESSION_SECRET=your_session_secret
 AUTH_GOOGLE_ID=your_google_client_id
 AUTH_GOOGLE_SECRET=your_google_client_secret
 FRONTEND_URL=http://localhost:5173
+RESEND_API_KEY=re_your_api_key
+EMAIL_FROM=Byatjo <no-reply@your-verified-domain.com>
 ```
+
+For production deployments on Railway, configure `RESEND_API_KEY` and `EMAIL_FROM` in the service's Variables. The application sends through Resend's HTTPS API when the key is set, avoiding SMTP connection timeouts. Verify the sender domain with Resend before using it. Gmail SMTP (`EMAIL_USER` + `EMAIL_PASS`) remains supported as a fallback; do not set both providers unless Resend should take priority.
 
 3. Start the development server:
 

@@ -1,4 +1,7 @@
-import transporter, { getMailerUser } from '../config/nodemailer';
+import transporter, {
+  getMailerUser,
+  isEmailDeliveryConfigured,
+} from '../config/nodemailer';
 
 // Generic type for send result (can be nodemailer response or logged JSON transport)
 interface SendResult {
@@ -52,8 +55,49 @@ const sendEmail = async (
   to: string,
   subject: string,
   html: string,
-): Promise<SendResult | null> => {
+): Promise<SendResult> => {
   try {
+    if (process.env.RESEND_API_KEY) {
+      const from = process.env.EMAIL_FROM;
+      if (!from) {
+        throw new Error('EMAIL_FROM is required when using Resend.');
+      }
+
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ from, to, subject, html }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const result = (await response.json().catch(() => ({}))) as {
+        id?: string;
+        message?: string;
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(
+          `Resend API request failed (${response.status}): ${
+            result.message || result.error || response.statusText
+          }`,
+        );
+      }
+
+      return { messageId: result.id, response: `HTTP ${response.status}` };
+    }
+
+    if (
+      process.env.NODE_ENV === 'production' &&
+      !isEmailDeliveryConfigured()
+    ) {
+      throw new Error(
+        'Email delivery is not configured. Set RESEND_API_KEY and EMAIL_FROM, or EMAIL_USER and EMAIL_PASS.',
+      );
+    }
+
     const result = await transporter.sendMail({
       from: `Byatjo <${getMailerUser()}>`,
       to,
@@ -63,7 +107,7 @@ const sendEmail = async (
     return result as SendResult;
   } catch (err) {
     console.error(`Email send failed (${subject}) to ${to}:`, err);
-    return null;
+    throw err;
   }
 };
 

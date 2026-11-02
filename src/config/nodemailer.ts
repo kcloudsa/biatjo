@@ -1,48 +1,42 @@
 import nodemailer, { Transporter } from 'nodemailer';
 
-const REQUIRED_VARS = ['EMAIL_USER', 'EMAIL_PASS'] as const;
+const hasResend = Boolean(process.env.RESEND_API_KEY);
+const hasSmtp = Boolean(process.env.EMAIL_USER && process.env.EMAIL_PASS);
 
-// Basic env validation (non-fatal in development if missing – falls back to JSON transport)
-const missing = REQUIRED_VARS.filter((k) => !process.env[k]);
-if (missing.length) {
-    console.warn(
-        `⚠️  Nodemailer: Missing environment variables: ${missing.join(', ')}. ` +
-            'Emails will use a JSON transport (logged to console) until these are provided.'
-    );
-}
-
-// Decide which transport to use
 let transporter: Transporter;
 
-if (!missing.length) {
-    // Gmail SMTP with App Password
-    transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS, // MUST be an App Password (16 chars)
-        },
-        // Connection pooling for burst sends
-        pool: true,
-        maxConnections: 5,
-        maxMessages: 50,
-    });
+if (hasSmtp && !hasResend) {
+  transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
+    pool: true,
+    maxConnections: 5,
+    maxMessages: 50,
+  });
 } else {
-    // Fallback transport that just outputs the message to console (no real sending)
-    transporter = nodemailer.createTransport({
-        jsonTransport: true,
-    });
+  transporter = nodemailer.createTransport({ jsonTransport: true });
 }
 
-// Run a one-time verification (non-blocking)
-(async () => {
-    try {
-        await transporter.verify();
-        console.log('✅ Nodemailer transporter is ready.');
-    } catch (err) {
-        console.error('❌ Nodemailer transporter verification failed:', err);
-    }
-})();
+if (hasResend) {
+  console.log('Email delivery configured with Resend HTTP API.');
+} else if (hasSmtp) {
+  void transporter
+    .verify()
+    .then(() => console.log('Nodemailer SMTP transporter is ready.'))
+    .catch((error) =>
+      console.error('Nodemailer SMTP transporter verification failed:', error),
+    );
+} else {
+  console.warn(
+    process.env.NODE_ENV === 'production'
+      ? 'No email provider configured. Production email delivery requires RESEND_API_KEY and EMAIL_FROM, or EMAIL_USER and EMAIL_PASS.'
+      : 'No real email provider configured. Development uses a JSON transport; configure RESEND_API_KEY or EMAIL_USER and EMAIL_PASS.',
+  );
+}
 
+export const isEmailDeliveryConfigured = () => hasResend || hasSmtp;
 export const getMailerUser = () => process.env.EMAIL_USER || 'dev@example.com';
 export default transporter;
