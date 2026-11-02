@@ -132,6 +132,7 @@ export const registerHandler = async (req: Request, res: Response) => {
         error: 'PHONE_EXISTS',
       });
 
+    const emailOtp = generateOTP();
     const emailOtpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
     const phoneOtpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
     const data = {
@@ -143,9 +144,9 @@ export const registerHandler = async (req: Request, res: Response) => {
       contactInfo: {
         email: {
           value: emailValue as string,
-          verified: true,
+          verified: false,
           verifiedAt: null,
-          verificationCode: null,
+          verificationCode: emailOtp,
           verificationCodeExpiresAt: emailOtpExpiresAt,
         },
         phone: {
@@ -189,6 +190,12 @@ export const registerHandler = async (req: Request, res: Response) => {
       }
     }
 
+    try {
+      await sendVerificationEmail(emailValue, emailOtp);
+    } catch (emailError) {
+      console.error('Registration verification email failed:', emailError);
+    }
+
     const userId = newUser.userID! as string;
     const accessToken = generateAccessToken({
       id: userId,
@@ -209,13 +216,15 @@ export const registerHandler = async (req: Request, res: Response) => {
       })
       .json({
         success: true,
-        message: 'User created successfully',
+        message:
+          'User created successfully. Please check your email for a verification code.',
         data: {
           userId: newUser.userID,
           email: (newUser as any).contactInfo.email.value,
           displayName: (newUser as any).name.displayName,
           refreshToken: refreshToken,
           token: accessToken,
+          expiresAt: emailOtpExpiresAt,
         },
       });
   } catch {
@@ -604,9 +613,35 @@ export const forgotPasswordHandler = async (req: Request, res: Response) => {
         message: 'Email is required',
         error: 'EMAIL_REQUIRED',
       });
+
+    const user = await UserModel.findOne({
+      $or: [
+        { 'contactInfo.email.value': email },
+        { 'contactInfo.email.email': email },
+      ],
+    });
+
+    if (!user) {
+      return res.status(200).json({
+        success: true,
+        message: 'If the email exists, a reset code has been sent.',
+      });
+    }
+
     const otp = generateOTP();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    user.passwordReset = {
+      ...(user.passwordReset || {}),
+      otp,
+      expiresAt,
+      attempts: 0,
+      lockedUntil: undefined,
+    } as any;
+
+    await user.save();
     await sendPasswordResetEmail(email, otp);
+
     return res.status(200).json({
       success: true,
       message: 'Password reset code sent. Please check your email.',
@@ -631,7 +666,72 @@ export const resetPasswordHandler = async (req: Request, res: Response) => {
         message: 'Email, OTP, and newPassword are required',
         error: 'MISSING_FIELDS',
       });
+
+    const user = await UserModel.findOne({
+      $or: [
+        { 'contactInfo.email.value': email },
+        { 'contactInfo.email.email': email },
+      ],
+    });
+
+    if (!user || !user.passwordReset?.otp)
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired reset code',
+        error: 'INVALID_OTP',
+      });
+
+    if (
+      user.passwordReset.lockedUntil &&
+      user.passwordReset.lockedUntil > new Date()
+    ) {
+      return res.status(429).json({
+        success: false,
+        message: 'Too many attempts. Try later.',
+        error: 'LOCKED',
+      });
+    }
+
+    const now = new Date();
+    if (
+      !user.passwordReset.expiresAt ||
+      new Date(user.passwordReset.expiresAt).getTime() < now.getTime()
+    ) {
+      user.passwordReset.attempts = (user.passwordReset.attempts || 0) + 1;
+      if ((user.passwordReset.attempts || 0) >= MAX_RESET_ATTEMPTS) {
+        user.passwordReset.lockedUntil = new Date(Date.now() + 15 * 60 * 1000);
+      }
+      await user.save();
+
+      return res.status(400).json({
+        success: false,
+        message: 'Reset code expired',
+        error: 'OTP_EXPIRED',
+      });
+    }
+
+    if (user.passwordReset.otp !== otp) {
+      user.passwordReset.attempts = (user.passwordReset.attempts || 0) + 1;
+      if ((user.passwordReset.attempts || 0) >= MAX_RESET_ATTEMPTS) {
+        user.passwordReset.lockedUntil = new Date(Date.now() + 15 * 60 * 1000);
+      }
+      await user.save();
+
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid reset code',
+        error: 'INVALID_OTP',
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+    (user as any).password = (user as any).password || {};
+    (user as any).password.hashed = hashedPassword;
+    (user as any).password.lastChangedAt = new Date();
+    user.passwordReset = undefined as any;
+    await user.save();
     await sendPasswordChangeNotificationEmail(email);
+
     return res.status(200).json({
       success: true,
       message: 'Password has been reset successfully.',

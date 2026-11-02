@@ -1,80 +1,175 @@
-# byatjo API Server
+# Byatjo API Server
 
-Modern e-commerce backend built with Express 5, TypeScript, and Mongoose. It provides JWT and OAuth-based authentication, user management, products, brands, categories, collections, carts, orders, reviews, saved items (wishlist), purchased items, addresses, and user history (recently viewed).
+Byatjo is a TypeScript + Express backend for a mobile/web commerce and transportation platform. The service exposes an API for user authentication, profile management, saved items, reviews, driver operations, search, and analytics.
+
+## Stack
+
+- Node.js 18+
+- TypeScript
+- Express 5
+- MongoDB + Mongoose
+- Passport.js
+- JWT auth with refresh tokens
+- Google OAuth
+- Socket.IO
+
+## Project structure
+
+```text
+src/
+  api/
+    Auth/
+    users/
+    search/
+    analytics/
+  models/
+  services/
+  utils/
+  interfaces/
+  middlewares/
+api/
+  index.ts
+docs/
+  auth/
+  actions.md
+  sockets.md
+tests/
+README.md
+```
 
 ## Quick start
 
-Prerequisites:
+1. Install dependencies:
 
-- Node.js 18+ (or Bun if you prefer) and npm
-- A MongoDB connection string
+```bash
+npm install
+```
 
-Environment variables (create a .env at project root):
+2. Create a `.env` file in the project root with the required variables:
 
-- `.env.example`
+```bash
+PORT=3001
+DB_URI=mongodb://localhost:27017/byatjo
+JWT_SECRET=your_jwt_secret
+ACCESS_TOKEN_SECRET=your_access_secret
+REFRESH_TOKEN_SECRET=your_refresh_secret
+SESSION_SECRET=your_session_secret
+AUTH_GOOGLE_ID=your_google_client_id
+AUTH_GOOGLE_SECRET=your_google_client_secret
+FRONTEND_URL=http://localhost:5173
+```
 
-Install and run in development:
+3. Start the development server:
 
-- `npm install`
-- `npm run dev`
+```bash
+npm run dev
+```
 
-Run the tests:
+4. Production build:
 
-- `npm test`
-- `npm run test:watch`
-
-Build and start (production):
-
-- `npm run build`
-- `npm start`
+```bash
+npm run build
+npm start
+```
 
 ## Base URLs
 
 - Health: `GET /`
-- Auth: `/auth`
-- API: `/api`
-- Interactive Swagger UI: `/docs`
-- OpenAPI JSON: `/docs.json`
+- Auth API: `/auth`
+- Main API: `/api`
+- Swagger UI: `/docs`
+- Swagger JSON: `/docs.json`
 
 ## Documentation
 
+- Authentication reference: [docs/auth/README.md](docs/auth/README.md)
 - HTTP actions: [docs/actions.md](docs/actions.md)
-- Socket.IO events: [docs/sockets.md](docs/sockets.md)
+- Socket events: [docs/sockets.md](docs/sockets.md)
 
-## API Documentation
+## Example auth flow
 
-The full per-route documentation is organized under the docs/ folder, one file per route:
+### Register
 
-- `docs/auth` — Authentication (register, OTP, login, refresh, logout, me, Google OAuth)
-- `docs/api` — API index and resources
-  - `docs/api/apikeys` — API key management
-  - `docs/api/brands` — Brand CRUD and queries
-  - `docs/api/products` — Product CRUD and queries
-  - `docs/api/users` — User read/update, password change
-  - `docs/api/saved` — Wishlist
-  - `docs/api/reviews` — Reviews
-  - `docs/api/cart` — Cart
-  - `docs/api/addresses` — Addresses (self and admin)
-  - `docs/api/purchased`-items — Purchase snapshots
-  - `docs/api/orders` — Orders and status history
-  - `docs/api/category` — Category CRUD and tree listing
-  - `docs/api/collection` — Collection CRUD (with products)
-  - `docs/api/history` — Recently viewed and admin history
+```bash
+curl -X POST http://localhost:3001/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "userName": {"firstName": "Ahmed", "lastName": "Elasmar"},
+    "contactInfo": {
+      "email": {"email": "ahmed@example.com"},
+      "phone": {"phoneNumber": "+218912345678"}
+    },
+    "password": "StrongPassword123!",
+    "userInfo": {"gender": "male", "nationality": "Libya"}
+  }'
+```
 
-Start with `docs/api/GET-index.md` for the API root response.
+### Login
 
-## Postman collection
+```bash
+curl -X POST http://localhost:3001/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "ahmed@example.com",
+    "password": "StrongPassword123!"
+  }'
+```
 
-An up-to-date collection is available at postman/collection.json with pre-request and test scripts to attach Authorization headers from a saved token.
+### Protected request
+
+```bash
+curl http://localhost:3001/auth/me \
+  -H "Authorization: Bearer <ACCESS_TOKEN>"
+```
+
+### Refresh token
+
+```bash
+curl -X POST http://localhost:3001/auth/refresh \
+  -H "Cookie: refreshToken=<REFRESH_TOKEN>"
+```
+
+### Forgot password with OTP
+
+```bash
+curl -X POST http://localhost:3001/auth/forgot-password \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "ahmed@example.com"
+  }'
+```
+
+Then reset the password using the OTP returned by email:
+
+```bash
+curl -X POST http://localhost:3001/auth/reset-password \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "ahmed@example.com",
+    "otp": "123456",
+    "newPassword": "NewSecurePassword123!"
+  }'
+```
+
+## API conventions
+
+- Successful requests return `{ "success": true, ... }`
+- Errors return `{ "success": false, "message": "...", "error": "..." }`
+- Access tokens are sent in the `Authorization: Bearer <token>` header
+- Refresh tokens are usually sent via cookie and stored server-side
+
+## Security notes
+
+- JWT-protected routes use Passport middleware
+- Refresh tokens are revoked on logout
+- Google OAuth is optional and enabled by configuration
+- Session/cookie settings are stricter in production
 
 ## Testing
 
-- Framework: Jest + Supertest.
-- Strategy: Lightweight router-only tests with mocks/stubs (no MongoDB server required).
+```bash
+npm test
+npm run test:watch
+```
 
-## Security
-
-- Helmet, rate-limit, and input sanitizers are enabled (stricter in production).
-- JWT-protected routes use Passport (JWT strategy). Optional JWT is used to record recently viewed items for public GETs.
-"# Byatjo" 
-"# Byatjo" 
+The project includes Jest and Supertest-based router tests.
