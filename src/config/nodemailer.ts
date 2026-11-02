@@ -27,12 +27,15 @@ const resolveProvider = (): EmailProvider => {
   const forced = readEnv('EMAIL_PROVIDER').toLowerCase() as EmailProvider;
   if (forced && forced in isConfigured) {
     if (!isConfigured[forced]) {
-      console.warn(
-        `EMAIL_PROVIDER=${forced} is set but its credentials are missing; falling back to auto-detection.`,
+      // Do not silently fall back (e.g. to Gmail SMTP, which Railway blocks).
+      console.error(
+        `EMAIL_PROVIDER=${forced} is set but its credentials are missing (${
+          forced === 'brevo' ? 'BREVO_API_KEY' : forced === 'gmail' ? 'EMAIL_USER/EMAIL_PASS' : 'RESEND_API_KEY'
+        }). Email sending is disabled until it is set.`,
       );
-    } else {
-      return forced;
+      return 'none';
     }
+    return forced;
   }
   if (hasBrevo) return 'brevo';
   if (hasGmail) return 'gmail';

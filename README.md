@@ -68,6 +68,8 @@ Email providers are picked in this order: Brevo (`BREVO_API_KEY`), Gmail SMTP (`
 - **Gmail SMTP:** works locally and on hosts that allow SMTP. Enable 2-Step Verification and use a 16-character App Password as `EMAIL_PASS`. Set `EMAIL_SMTP_PORT=587` if port 465 is blocked.
 - **Resend:** only delivers to arbitrary recipients after you verify a domain you own.
 
+See [docs/email.md](docs/email.md) for the full setup, Railway deployment steps, the endpoints that send email, and troubleshooting.
+
 3. Start the development server:
 
 ```bash
