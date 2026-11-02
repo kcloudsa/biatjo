@@ -59,7 +59,11 @@ Base path: `/auth`
 
 - POST `/otp/register`
   - Body: `{ email }`
-  - Action: generates OTP, stores on user, sends email
+  - Action: generates OTP, stores it on an existing unverified user, and sends the email
+
+- POST `/otp/resend`
+  - Body: `{ email }`
+  - Action: resends a fresh verification OTP to an existing unverified user; returns `503 EMAIL_DELIVERY_FAILED` if the provider cannot deliver it
 
 - POST `/otp/verify`
   - Body: `{ email, otp }`

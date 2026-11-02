@@ -36,6 +36,7 @@ This module provides the authentication layer for the Byatjo API. It handles reg
 | POST | `/auth/register` | No | Create a standard user account |
 | POST | `/auth/registerDriver` | No | Create a driver profile after a user exists |
 | POST | `/auth/otp/register` | No | Send a verification OTP for a registered email |
+| POST | `/auth/otp/resend` | No | Resend an email verification OTP to an existing, unverified user |
 | POST | `/auth/otp/verify` | No | Verify a one-time password |
 | POST | `/auth/forgot-password` | No | Request password reset flow |
 | POST | `/auth/password-reset/check-otp` | No | Check a password-reset OTP without changing the password |
@@ -135,6 +136,30 @@ curl -X POST http://localhost:3001/auth/register \
     "email": "ahmed@example.com"
   }'
 ```
+
+If registration created the account but email delivery failed, resend the verification code:
+
+```bash
+curl -X POST https://your-api-url/auth/otp/resend \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "ahmed@example.com"
+  }'
+```
+
+Successful response:
+
+```json
+{
+  "success": true,
+  "message": "Verification code sent. Please check your email.",
+  "data": {
+    "expiresAt": "2026-11-02T09:40:00.000Z"
+  }
+}
+```
+
+Then verify the code with `POST /auth/otp/verify` using `{ "email": "ahmed@example.com", "otp": "123456" }`. Codes expire after 10 minutes. `/auth/otp/register` remains available for compatibility and performs the same resend action.
 
 ### 2) Log in
 

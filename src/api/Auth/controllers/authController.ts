@@ -505,42 +505,56 @@ export const registerDriverHandler = async (req: Request, res: Response) => {
 // OTP flows
 export const otpRegisterHandler = async (req: Request, res: Response) => {
   try {
-    const { email } = req.body;
+    const email =
+      typeof req.body?.email === 'string' ? req.body.email.trim() : '';
     if (!email)
       return res.status(400).json({
         success: false,
         message: 'Email is required',
         error: 'EMAIL_REQUIRED',
       });
-    const otp = generateOTP();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    const updatedUser = await UserModel.findOneAndUpdate(
-      {
-        $or: [
-          { 'contactInfo.email.value': email },
-          { 'contactInfo.email.email': email },
-        ],
-      },
-      {
-        $set: {
-          'contactInfo.email.verificationCode': otp,
-          'contactInfo.email.verificationCodeExpiresAt': expiresAt,
-          'contactInfo.email.verified': false,
-        },
-      },
-      { new: true },
-    );
-    if (!updatedUser)
+
+    const user = await UserModel.findOne({
+      $or: [
+        { 'contactInfo.email.value': email },
+        { 'contactInfo.email.email': email },
+      ],
+    });
+    if (!user)
       return res.status(404).json({
         success: false,
         message: 'User not found. Complete main registration first.',
         error: 'USER_NOT_FOUND',
       });
-    await sendVerificationEmail(email, otp);
+
+    if ((user as any).contactInfo?.email?.verified) {
+      return res.status(200).json({
+        success: true,
+        message: 'Email is already verified.',
+      });
+    }
+
+    const otp = generateOTP();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    const emailInfo = (user as any).contactInfo.email;
+    emailInfo.verificationCode = otp;
+    emailInfo.verificationCodeExpiresAt = expiresAt;
+    await user.save();
+
+    try {
+      await sendVerificationEmail(email, otp);
+    } catch (emailError) {
+      console.error('Verification OTP resend failed:', emailError);
+      return res.status(503).json({
+        success: false,
+        message: 'Could not send the verification code. Please try again later.',
+        error: 'EMAIL_DELIVERY_FAILED',
+      });
+    }
+
     return res.status(200).json({
       success: true,
-      message:
-        'Registration successful. Please check your email for a verification code.',
+      message: 'Verification code sent. Please check your email.',
       data: { expiresAt },
     });
   } catch (error) {

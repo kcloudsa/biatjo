@@ -39,6 +39,7 @@ registerSessionSerialization(passport);
 router.post('/register', registerHandler);
 router.post('/registerDriver', registerDriverHandler);
 router.post('/otp/register', otpRegisterHandler);
+router.post('/otp/resend', otpRegisterHandler);
 router.post('/otp/verify', otpVerifyHandler);
 router.post('/forgot-password', forgotPasswordHandler);
 router.post('/password-reset/check-otp', passwordResetOtpCheckHandler);
