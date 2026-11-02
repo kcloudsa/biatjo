@@ -82,3 +82,6 @@ bun.lock
 
 # dist
 /dist
+# Local/production env copies (contain secrets)
+.env.*
+!.env.example

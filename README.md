@@ -57,11 +57,16 @@ SESSION_SECRET=your_session_secret
 AUTH_GOOGLE_ID=your_google_client_id
 AUTH_GOOGLE_SECRET=your_google_client_secret
 FRONTEND_URL=http://localhost:5173
-RESEND_API_KEY=re_your_api_key
-EMAIL_FROM=Byatjo <no-reply@your-verified-domain.com>
+EMAIL_USER=your.address@gmail.com
+EMAIL_PASS=your_gmail_app_password
+BREVO_API_KEY=xkeysib-your_brevo_key
 ```
 
-For production deployments on Railway, configure `RESEND_API_KEY` and `EMAIL_FROM` in the service's Variables. The application sends through Resend's HTTPS API when the key is set, avoiding SMTP connection timeouts. Verify the sender domain with Resend before using it. Gmail SMTP (`EMAIL_USER` + `EMAIL_PASS`) remains supported as a fallback; do not set both providers unless Resend should take priority.
+Email providers are picked in this order: Brevo (`BREVO_API_KEY`), Gmail SMTP (`EMAIL_USER` + `EMAIL_PASS`), then Resend (`RESEND_API_KEY` + `EMAIL_FROM`). Set `EMAIL_PROVIDER=brevo|gmail|resend` to force one.
+
+- **Production on Railway (no custom domain):** Railway's Free/Hobby plans block outbound SMTP, so Gmail SMTP times out there. Create a free Brevo account, verify your Gmail address under *Senders*, create an API key under *SMTP & API*, and set `BREVO_API_KEY` and `EMAIL_USER` (used as the sender unless `EMAIL_FROM` is set) in the service Variables.
+- **Gmail SMTP:** works locally and on hosts that allow SMTP. Enable 2-Step Verification and use a 16-character App Password as `EMAIL_PASS`. Set `EMAIL_SMTP_PORT=587` if port 465 is blocked.
+- **Resend:** only delivers to arbitrary recipients after you verify a domain you own.
 
 3. Start the development server:
 

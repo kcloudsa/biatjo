@@ -1,6 +1,8 @@
 import transporter, {
+  emailProvider,
   getMailerUser,
-  isEmailDeliveryConfigured,
+  getSender,
+  readEnv,
 } from '../config/nodemailer';
 
 // Generic type for send result (can be nodemailer response or logged JSON transport)
@@ -50,6 +52,32 @@ const buildEmailWrapper = (title: string, contentHtml: string): string => {
 	</html>`;
 };
 
+const formatSender = ({ name, email }: { name?: string; email: string }) =>
+  name ? `${name} <${email}>` : email;
+
+const postJson = async (
+  provider: string,
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+) => {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...headers },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15000),
+  });
+  const result = (await response.json().catch(() => ({}))) as Record<string, any>;
+  if (!response.ok) {
+    throw new Error(
+      `${provider} API request failed (${response.status}): ${
+        result.message || result.error || response.statusText
+      }`,
+    );
+  }
+  return { result, status: response.status };
+};
+
 // Internal core send function
 const sendEmail = async (
   to: string,
@@ -57,62 +85,46 @@ const sendEmail = async (
   html: string,
 ): Promise<SendResult> => {
   try {
-    if (process.env.RESEND_API_KEY) {
-      const from = process.env.EMAIL_FROM;
-      if (!from) {
-        throw new Error('EMAIL_FROM is required when using Resend.');
-      }
-
-      const response = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ from, to, subject, html }),
-        signal: AbortSignal.timeout(15000),
-      });
-      const result = (await response.json().catch(() => ({}))) as {
-        id?: string;
-        message?: string;
-        error?: string;
-      };
-
-      if (!response.ok) {
-        throw new Error(
-          `Resend API request failed (${response.status}): ${
-            result.message || result.error || response.statusText
-          }`,
+    switch (emailProvider) {
+      case 'brevo': {
+        // Brevo works without a custom domain: verify your Gmail address as a sender in Brevo.
+        const { result, status } = await postJson(
+          'Brevo',
+          'https://api.brevo.com/v3/smtp/email',
+          { 'api-key': readEnv('BREVO_API_KEY') },
+          { sender: getSender(), to: [{ email: to }], subject, htmlContent: html },
         );
+        return { messageId: result.messageId, response: `HTTP ${status}` };
       }
 
-      return { messageId: result.id, response: `HTTP ${response.status}` };
-    }
+      case 'resend': {
+        // Resend requires a verified domain to email anyone other than the account owner.
+        const { result, status } = await postJson(
+          'Resend',
+          'https://api.resend.com/emails',
+          { Authorization: `Bearer ${readEnv('RESEND_API_KEY')}` },
+          { from: formatSender(getSender()), to, subject, html },
+        );
+        return { messageId: result.id, response: `HTTP ${status}` };
+      }
 
-    if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-      const result = await transporter.sendMail({
-        from: `Byatjo <${getMailerUser()}>`,
-        to,
-        subject,
-        html,
-      });
-      return result as SendResult;
-    }
+      case 'gmail': {
+        const result = await transporter.sendMail({
+          from: `Byatjo <${getMailerUser()}>`,
+          to,
+          subject,
+          html,
+        });
+        return result as SendResult;
+      }
 
-    if (
-      process.env.NODE_ENV === 'production' &&
-      !isEmailDeliveryConfigured()
-    ) {
-      throw new Error(
-        'Email delivery is not configured. Set RESEND_API_KEY and EMAIL_FROM, or EMAIL_USER and EMAIL_PASS.',
-      );
+      default:
+        throw new Error(
+          'Email delivery is not configured. Set BREVO_API_KEY (recommended), EMAIL_USER + EMAIL_PASS for Gmail SMTP, or RESEND_API_KEY + EMAIL_FROM.',
+        );
     }
-
-    throw new Error(
-      'Email delivery is not configured. Set EMAIL_USER and EMAIL_PASS for Gmail SMTP, or RESEND_API_KEY and EMAIL_FROM for Resend.',
-    );
   } catch (err) {
-    console.error(`Email send failed (${subject}) to ${to}:`, err);
+    console.error(`Email send failed via ${emailProvider} (${subject}) to ${to}:`, err);
     throw err;
   }
 };
