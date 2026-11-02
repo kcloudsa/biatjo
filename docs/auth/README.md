@@ -66,11 +66,12 @@ SESSION_SECRET=your_session_secret
 AUTH_GOOGLE_ID=your_google_client_id
 AUTH_GOOGLE_SECRET=your_google_client_secret
 FRONTEND_URL=http://localhost:5173
-RESEND_API_KEY=re_your_api_key
-EMAIL_FROM=Byatjo <no-reply@your-verified-domain.com>
+EMAIL_USER=your.address@gmail.com
+EMAIL_PASS=your_gmail_app_password
+BREVO_API_KEY=xkeysib-your_brevo_key
 ```
 
-For local development, store these in a root `.env` file. In production (including Railway), set `RESEND_API_KEY` and `EMAIL_FROM` as service variables and verify the sender domain with Resend. The app uses Resend over HTTPS when configured, which avoids SMTP port/connectivity timeouts. Gmail SMTP remains available with `EMAIL_USER` and `EMAIL_PASS` if Resend is not configured.
+For local development, store these in a root `.env` file. For production on Railway and the email provider setup, see [docs/email.md](../email.md).
 
 ## Quick start
 
@@ -119,14 +120,16 @@ Example response:
     "userId": "U123456",
     "email": "ahmed@example.com",
     "displayName": "A.",
-    "refreshToken": "refresh-token-value",
-    "token": "access-token-value",
-    "expiresAt": "2026-11-02T09:40:00.000Z"
+    "verified": false,
+    "expiresAt": "2026-11-02T09:40:00.000Z",
+    "verifyEndpoint": "/auth/otp/verify"
   }
 }
 ```
 
-The API also supports an email-only registration flow:
+Registration does **not** return tokens. The user is signed in after verifying the email code (see below).
+
+The email-only flow resends the verification code for an existing, unverified account (same as `/auth/otp/resend`):
 
 ```bash
 curl -X POST http://localhost:3001/auth/register \
@@ -159,7 +162,36 @@ Successful response:
 }
 ```
 
-Then verify the code with `POST /auth/otp/verify` using `{ "email": "ahmed@example.com", "otp": "123456" }`. Codes expire after 10 minutes. `/auth/otp/register` remains available for compatibility and performs the same resend action.
+Then verify the code:
+
+```bash
+curl -X POST http://localhost:3001/auth/otp/verify \
+  -H "Content-Type: application/json" \
+  -d '{ "email": "ahmed@example.com", "otp": "123456" }'
+```
+
+A successful verification signs the user in. It sets the `refreshToken` cookie and returns:
+
+```json
+{
+  "success": true,
+  "message": "Email verified successfully",
+  "data": {
+    "verified": true,
+    "userId": "U123456",
+    "email": "ahmed@example.com",
+    "displayName": "Ahmed E.",
+    "role": "user",
+    "token": "access-token-value",
+    "accessToken": "access-token-value",
+    "refreshToken": "refresh-token-value"
+  }
+}
+```
+
+Codes expire after 10 minutes, and only the most recently sent code works. `/auth/otp/register` remains available for compatibility and performs the same resend action. Emails are matched without regard to letter case.
+
+See [Email verification rules](../email.md#email-verification-rules) for every action that checks or sets verification.
 
 ### 2) Log in
 
@@ -191,9 +223,26 @@ Example response:
 }
 ```
 
+If the password is correct but the email is not verified, login returns `403` and a new code is emailed when the previous one has expired:
+
+```json
+{
+  "success": false,
+  "message": "Email is not verified. Enter the code sent to your email, or request a new one.",
+  "error": "EMAIL_NOT_VERIFIED",
+  "data": {
+    "email": "ahmed@example.com",
+    "verifyEndpoint": "/auth/otp/verify",
+    "resendEndpoint": "/auth/otp/resend"
+  }
+}
+```
+
+A wrong password always returns `401 INVALID_CREDENTIALS`, whether or not the email is verified.
+
 ### 3) Use the access token
 
-After login or registration, send the token in the `Authorization` header:
+After login or email verification, send the token in the `Authorization` header:
 
 ```bash
 curl http://localhost:3001/auth/me \

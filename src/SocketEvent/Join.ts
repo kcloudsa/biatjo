@@ -4,6 +4,7 @@ import { Driver } from '../models/DriverModel';
 import { Trip } from '../models/TripModel';
 import mongoose from 'mongoose';
 import { trackJoin, trackLeave, tripRoom, userRooms } from './Rooms';
+import { requireIdentity } from './socketAuth';
 
 export default (io: Server, socket: Socket) => {
   // socket.on('trip:join', async ({ tripId, userId, role }) => {
@@ -120,6 +121,17 @@ export default (io: Server, socket: Socket) => {
           socket.emit('trip:join:status', payload);
           return;
         }
+
+        // The socket must be identified as this (verified) user
+        const me = requireIdentity(
+          socket,
+          (payload) => {
+            cb?.(payload);
+            socket.emit('trip:join:status', payload);
+          },
+          userId,
+        );
+        if (!me) return;
 
         // ---------- Trip ----------
         const trip = await Trip.findById(tripId).lean();
@@ -240,6 +252,16 @@ export default (io: Server, socket: Socket) => {
           socket.emit('trip:leave:status', payload);
           return;
         }
+
+        const me = requireIdentity(
+          socket,
+          (payload) => {
+            cb?.(payload);
+            socket.emit('trip:leave:status', payload);
+          },
+          userId,
+        );
+        if (!me) return;
 
         // Leave a specific trip
         if (tripId) {

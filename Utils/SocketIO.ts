@@ -7,7 +7,7 @@ import riderEvents from '../src/SocketEvent/Rider';
 import joinEvents from '../src/SocketEvent/Join';
 import tripEvents from '../src/SocketEvent/Trip';
 import userIdentifyEvents from '../src/SocketEvent/UserIdentify';
-import { socketOptionalAuthenticateJWT } from './socketOptionalAuth';
+import { socketAuthMiddleware } from '../src/SocketEvent/socketAuth';
 import {
   trackJoin,
   trackLeave,
@@ -32,7 +32,8 @@ export const setupSocket = (httpServer: HttpServer, app: Express) => {
   // Make io available everywhere via req.app.get('io')
   app.set('io', io);
 
-  // io.use(socketOptionalAuthenticateJWT(passport));
+  // Binds the user from handshake auth.token (see src/SocketEvent/socketAuth.ts)
+  io.use(socketAuthMiddleware);
   io.on('connection', (socket) => {
     console.log('⚡ User connected:', socket.id);
     //    const userId = socket.handshake.auth?.userId as string | undefined;
@@ -61,15 +62,18 @@ export const setupSocket = (httpServer: HttpServer, app: Express) => {
     //   }
     // }
     userIdentifyEvents(socket);
-    socket.on('listen:test', (data) => {
-      console.log('rider:ping', data);
-      socket.broadcast.emit('listen:res', {
-        ok: true,
-        from: socket.id,
-        data,
-        at: new Date().toISOString(),
+    // Debug broadcast to every client: disabled in production
+    if (process.env.NODE_ENV !== 'production') {
+      socket.on('listen:test', (data) => {
+        console.log('listen:test', data);
+        socket.broadcast.emit('listen:res', {
+          ok: true,
+          from: socket.id,
+          data,
+          at: new Date().toISOString(),
+        });
       });
-    });
+    }
     joinEvents(io, socket);
     driverEvents(io, socket);
     riderEvents(io, socket);

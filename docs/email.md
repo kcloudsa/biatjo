@@ -95,16 +95,60 @@ All routes are available under both `/auth` and `/api/auth`.
 
 | Endpoint | Email sent | If sending fails |
 | --- | --- | --- |
-| `POST /auth/register` | Verification OTP | `503 EMAIL_DELIVERY_FAILED`. The account is still created; call `/auth/otp/register` to retry. |
+| `POST /auth/register` | Verification OTP | `503 EMAIL_DELIVERY_FAILED`. The account is still created; call `/auth/otp/resend` to retry. |
+| `POST /auth/register` with `emailOnly: true` | Verification OTP | `503 EMAIL_DELIVERY_FAILED` |
 | `POST /auth/otp/register` | Verification OTP | `503 EMAIL_DELIVERY_FAILED` |
 | `POST /auth/otp/resend` | Verification OTP | `503 EMAIL_DELIVERY_FAILED` |
-| `POST /auth/login` (unverified email) | New verification OTP, sent in the background | Login still returns `EMAIL_NOT_VERIFIED`; the failure is only logged. |
-| `POST /auth/forgot-password` | Password reset OTP | `500 FORGOT_PASSWORD_ERROR` |
-| `POST /auth/reset-password` | "Password changed" notice | `500`, although the password is already changed at that point |
-| `POST /auth/password-reset/request` | Password reset link | `500 RESET_REQUEST_ERROR` |
-| `POST /auth/password-reset/complete` | "Password changed" notice | `500`, although the password is already changed at that point |
+| `POST /auth/login` (correct password, unverified email) | New verification OTP when the last one expired, sent in the background | Login still returns `403 EMAIL_NOT_VERIFIED`; the failure is only logged. |
+| `POST /auth/forgot-password` | Password reset OTP | `503 EMAIL_DELIVERY_FAILED` |
+| `POST /auth/reset-password` | "Password changed" notice | Logged only. The reset still succeeds. |
+| `POST /auth/password-reset/request` | Password reset link | `503 EMAIL_DELIVERY_FAILED` |
+| `POST /auth/password-reset/complete` | "Password changed" notice | Logged only. The reset still succeeds. |
 
 OTP codes are 6 digits and expire after 10 minutes.
+
+## Email verification rules
+
+Shared logic lives in `src/lib/emailVerification.ts`.
+
+**New accounts.** `POST /auth/register` creates the user with:
+
+| Field | Value |
+| --- | --- |
+| `contactInfo.email.value` | Email in lowercase, trimmed |
+| `contactInfo.email.verified` | `false` |
+| `contactInfo.email.verifiedAt` | `null` |
+| `contactInfo.email.verificationCode` | The 6-digit code that was emailed |
+| `contactInfo.email.verificationCodeExpiresAt` | Now + 10 minutes |
+| `contactInfo.phone.verified` | `false` (phone verification is not implemented) |
+| `contactInfo.phone.verificationCode` / `verificationCodeExpiresAt` | `null` |
+| `isVerified` | `false` |
+| `userInfo.gender` | Value sent, or `unknown` |
+| `userInfo.nationality` | Value sent, or the schema default `Libyan` |
+| `role` / `active` | `user` / `true` |
+
+**Actions that mark the email as verified.** Each sets `contactInfo.email.verified = true`, `verifiedAt`, `isVerified = true`, and clears the pending code:
+
+- `POST /auth/otp/verify` with the latest code. This also signs the user in.
+- `POST /auth/reset-password` with a valid reset OTP. The code reached the inbox, which proves ownership.
+- `POST /auth/password-reset/complete` with a valid reset link token.
+- Google sign-in, when Google reports the address as verified.
+
+**Actions that require a verified email:**
+
+| Action | Unverified result |
+| --- | --- |
+| `POST /auth/login` and `POST /auth/login/dash` | `403 EMAIL_NOT_VERIFIED`, checked only after the password is correct |
+| `POST /auth/refresh` | `403 EMAIL_NOT_VERIFIED` |
+| Any route protected by a Bearer token | `401 UNAUTHORIZED` |
+| `POST /auth/register` | Returns no tokens until the email is verified |
+
+**Other rules:**
+
+- Emails are matched case-insensitively everywhere, so `Ahmed@x.com` and `ahmed@x.com` are the same account.
+- Sending a new code replaces the previous one; only the latest code works.
+- Registering an email that already exists returns `409 EMAIL_EXISTS` with `data.verified`, so the app can offer "resend code" when it is `false`.
+- Requesting a new password reset code does not clear an active lockout after too many wrong attempts.
 
 Quick test with Postman or curl:
 

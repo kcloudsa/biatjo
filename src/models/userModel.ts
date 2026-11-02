@@ -48,17 +48,17 @@ const userSchema = new Schema<Iuser>(
       email: {
         value: { type: String, required: true, trim: true, unique: false },
         verified: { type: Boolean, default: false },
-        verifiedAt: { type: Date },
-        verificationCode: { type: String, trim: true },
-        verificationCodeExpiresAt: { type: Date },
+        verifiedAt: { type: Date, default: null },
+        verificationCode: { type: String, trim: true, default: null },
+        verificationCodeExpiresAt: { type: Date, default: null },
       },
       phone: {
         countryCode: { type: String, trim: true, default: '+218' },
         value: { type: String, trim: true },
         verified: { type: Boolean, default: false },
-        verifiedAt: { type: Date },
-        verificationCode: { type: String, trim: true },
-        verificationCodeExpiresAt: { type: Date },
+        verifiedAt: { type: Date, default: null },
+        verificationCode: { type: String, trim: true, default: null },
+        verificationCodeExpiresAt: { type: Date, default: null },
       },
     },
 
@@ -188,6 +188,15 @@ userSchema.pre('save', async function (next) {
       self.name = self.name || {};
       self.name.displayName = display;
       self.name.slug = slugify(display);
+    }
+
+    // A verified email or phone means the account is verified.
+    // (Never forced back to false here: admins may set isVerified directly.)
+    if (
+      self.contactInfo?.email?.verified === true ||
+      self.contactInfo?.phone?.verified === true
+    ) {
+      self.isVerified = true;
     }
 
     // Hash password only if a new plaintext (non-bcrypt) value was set/changed

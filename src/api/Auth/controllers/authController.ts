@@ -25,30 +25,71 @@ import { Types } from 'mongoose';
 import ICar, { CarKindEnum } from '../../../interfaces/ICar';
 import CarModel from '../../../models/carModel';
 import { Driver } from '../../../models/DriverModel';
+import {
+  applyEmailVerified,
+  EMAIL_NOT_VERIFIED,
+  findUserByEmail,
+  getStoredEmail,
+  isEmailVerified,
+  normalizeEmail,
+  OTP_TTL_MS,
+} from '../../../lib/emailVerification';
+
+const emailNotVerifiedResponse = (res: Response, email?: string) =>
+  res.status(403).json({
+    success: false,
+    message:
+      'Email is not verified. Enter the code sent to your email, or request a new one.',
+    error: EMAIL_NOT_VERIFIED,
+    data: {
+      email,
+      verifyEndpoint: '/auth/otp/verify',
+      resendEndpoint: '/auth/otp/resend',
+    },
+  });
+
+/** Issues access + refresh tokens and sets the refresh cookie. */
+const issueTokens = async (res: Response, user: any) => {
+  const userId = user.userID as string;
+  const accessToken = generateAccessToken({
+    id: userId,
+    email: getStoredEmail(user),
+    name: user.name?.displayName || '',
+    role: user.role,
+  });
+  const refreshToken = generateRefreshToken();
+  await storeRefreshToken(userId, refreshToken);
+  res.cookie('refreshToken', refreshToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  });
+  return { accessToken, refreshToken };
+};
+
+/** Sends a non-critical notification without failing the request. */
+const sendPasswordChangedNotice = async (email: string) => {
+  try {
+    await sendPasswordChangeNotificationEmail(email);
+  } catch (err) {
+    console.error('Password change notification failed:', err);
+  }
+};
+
+const emailDeliveryFailed = (res: Response, message: string) =>
+  res.status(503).json({
+    success: false,
+    message,
+    error: 'EMAIL_DELIVERY_FAILED',
+  });
 
 // POST /auth/register
 export const registerHandler = async (req: Request, res: Response) => {
-  try {
-    if (req.body && req.body.emailOnly) {
-      const { email } = req.body;
-      if (!email)
-        return res.status(400).json({
-          success: false,
-          message: 'Email is required',
-          error: 'EMAIL_REQUIRED',
-        });
-      const otp = generateOTP();
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-      await sendVerificationEmail(email, otp);
-      return res.status(200).json({
-        success: true,
-        message:
-          'Registration successful. Please check your email for a verification code.',
-        data: { expiresAt },
-      });
-    }
-  } catch (err) {
-    console.error('Inline OTP register flow error:', err);
+  // Email-only request = (re)send the verification code for an existing account.
+  // The code is stored on the user so /auth/otp/verify can check it.
+  if (req.body && req.body.emailOnly) {
+    return otpRegisterHandler(req, res);
   }
 
   try {
@@ -61,7 +102,9 @@ export const registerHandler = async (req: Request, res: Response) => {
         error: 'VALIDATION_ERROR',
       });
     }
-    const emailValue = contactInfo?.email?.email || contactInfo?.email?.value;
+    const emailValue = normalizeEmail(
+      contactInfo?.email?.email || contactInfo?.email?.value,
+    );
     if (!emailValue) {
       return res.status(400).json({
         success: false,
@@ -106,17 +149,15 @@ export const registerHandler = async (req: Request, res: Response) => {
       ? passwordValue
       : await bcrypt.hash(passwordValue, 12);
 
-    const existingEmailUser = await UserModel.findOne({
-      $or: [
-        { 'contactInfo.email.value': emailValue },
-        { 'contactInfo.email.email': emailValue },
-      ],
-    });
+    const existingEmailUser = await findUserByEmail(emailValue);
     if (existingEmailUser)
       return res.status(409).json({
         success: false,
-        message: 'Email already in use',
+        message: isEmailVerified(existingEmailUser)
+          ? 'Email already in use'
+          : 'Email already registered but not verified. Request a new code with /auth/otp/resend.',
         error: 'EMAIL_EXISTS',
+        data: { verified: isEmailVerified(existingEmailUser) },
       });
 
     const existingPhoneUser = await UserModel.findOne({
@@ -133,8 +174,7 @@ export const registerHandler = async (req: Request, res: Response) => {
       });
 
     const emailOtp = generateOTP();
-    const emailOtpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    const phoneOtpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    const emailOtpExpiresAt = new Date(Date.now() + OTP_TTL_MS);
     const data = {
       name: {
         firstName: userName.firstName,
@@ -143,7 +183,7 @@ export const registerHandler = async (req: Request, res: Response) => {
       },
       contactInfo: {
         email: {
-          value: emailValue as string,
+          value: emailValue,
           verified: false,
           verifiedAt: null,
           verificationCode: emailOtp,
@@ -153,11 +193,12 @@ export const registerHandler = async (req: Request, res: Response) => {
           countryCode: contactInfo?.phone?.countryCode
             ? contactInfo?.phone?.countryCode
             : '+218',
-          value: phoneValue as string,
+          value: String(phoneValue).trim(),
           verified: false,
           verifiedAt: null,
+          // Phone verification is not implemented yet
           verificationCode: null,
-          verificationCodeExpiresAt: phoneOtpExpiresAt,
+          verificationCodeExpiresAt: null,
         },
       },
       password: {
@@ -165,15 +206,18 @@ export const registerHandler = async (req: Request, res: Response) => {
         expirationDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
       },
       userInfo: {
-        gender: userInfo?.gender ? userInfo?.gender : 'unknown',
-        nationality: userInfo?.nationality
-          ? userInfo?.nationality
-          : 'somewhere',
-        profilePicture: userInfo?.profilePicture
-          ? userInfo?.profilePicture
-          : [],
+        gender: userInfo?.gender || 'unknown',
+        // Falls back to the schema default when not provided
+        ...(userInfo?.nationality ? { nationality: userInfo.nationality } : {}),
+        profilePicture: Array.isArray(userInfo?.profilePicture)
+          ? userInfo.profilePicture
+          : userInfo?.profilePicture
+            ? [userInfo.profilePicture]
+            : [],
       },
       licenseID: undefined,
+      // New accounts start unverified until the email OTP is confirmed
+      isVerified: false,
       // Align with user model enum: ['user','driver','admin','demo']
       role: 'user',
       active: true,
@@ -206,42 +250,26 @@ export const registerHandler = async (req: Request, res: Response) => {
       });
     }
 
-    const userId = newUser.userID! as string;
-    const accessToken = generateAccessToken({
-      id: userId,
-      email: (newUser as any).contactInfo.email.value,
-      name: (newUser as any).name.displayName,
-      role: newUser.role,
+    // No tokens yet: the user receives them from /auth/otp/verify
+    return res.status(201).json({
+      success: true,
+      message:
+        'User created successfully. Please check your email for a verification code.',
+      data: {
+        userId: newUser.userID,
+        email: (newUser as any).contactInfo.email.value,
+        displayName: (newUser as any).name.displayName,
+        verified: false,
+        expiresAt: emailOtpExpiresAt,
+        verifyEndpoint: '/auth/otp/verify',
+      },
     });
-    const refreshToken = generateRefreshToken();
-    await storeRefreshToken(userId, refreshToken);
-
-    return res
-      .status(201)
-      .cookie('refreshToken', refreshToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
-        maxAge: 30 * 24 * 60 * 60 * 1000,
-      })
-      .json({
-        success: true,
-        message:
-          'User created successfully. Please check your email for a verification code.',
-        data: {
-          userId: newUser.userID,
-          email: (newUser as any).contactInfo.email.value,
-          displayName: (newUser as any).name.displayName,
-          refreshToken: refreshToken,
-          token: accessToken,
-          expiresAt: emailOtpExpiresAt,
-        },
-      });
-  } catch {
+  } catch (error) {
+    console.error('Registration error:', error);
     return res.status(500).json({
       success: false,
-      message: 'Driver registration incomplete',
-      error: 'DRIVER_REGISTRATION_FAILED',
+      message: 'Registration failed',
+      error: 'REGISTER_ERROR',
     });
   }
 };
@@ -505,8 +533,7 @@ export const registerDriverHandler = async (req: Request, res: Response) => {
 // OTP flows
 export const otpRegisterHandler = async (req: Request, res: Response) => {
   try {
-    const email =
-      typeof req.body?.email === 'string' ? req.body.email.trim() : '';
+    const email = normalizeEmail(req.body?.email);
     if (!email)
       return res.status(400).json({
         success: false,
@@ -514,12 +541,7 @@ export const otpRegisterHandler = async (req: Request, res: Response) => {
         error: 'EMAIL_REQUIRED',
       });
 
-    const user = await UserModel.findOne({
-      $or: [
-        { 'contactInfo.email.value': email },
-        { 'contactInfo.email.email': email },
-      ],
-    });
+    const user = await findUserByEmail(email);
     if (!user)
       return res.status(404).json({
         success: false,
@@ -527,22 +549,23 @@ export const otpRegisterHandler = async (req: Request, res: Response) => {
         error: 'USER_NOT_FOUND',
       });
 
-    if ((user as any).contactInfo?.email?.verified) {
+    if (isEmailVerified(user)) {
       return res.status(200).json({
         success: true,
         message: 'Email is already verified.',
+        data: { verified: true },
       });
     }
 
     const otp = generateOTP();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    const expiresAt = new Date(Date.now() + OTP_TTL_MS);
     const emailInfo = (user as any).contactInfo.email;
     emailInfo.verificationCode = otp;
     emailInfo.verificationCodeExpiresAt = expiresAt;
     await user.save();
 
     try {
-      await sendVerificationEmail(email, otp);
+      await sendVerificationEmail(getStoredEmail(user), otp);
     } catch (emailError) {
       console.error('Verification OTP resend failed:', emailError);
       return res.status(503).json({
@@ -576,27 +599,24 @@ export const otpVerifyHandler = async (req: Request, res: Response) => {
         message: 'Email and OTP are required',
         error: 'MISSING_FIELDS',
       });
-    const user = await UserModel.findOne({
-      $or: [
-        { 'contactInfo.email.value': email },
-        { 'contactInfo.email.email': email },
-      ],
-    });
+    const user = await findUserByEmail(email);
     if (!user)
       return res.status(404).json({
         success: false,
         message: 'User not found',
         error: 'USER_NOT_FOUND',
       });
-    if ((user as any).contactInfo?.email?.verified)
-      return res
-        .status(200)
-        .json({ success: true, message: 'Email already verified' });
+    if (isEmailVerified(user))
+      return res.status(200).json({
+        success: true,
+        message: 'Email already verified. Please log in.',
+        data: { verified: true },
+      });
 
     const storedCode = (user as any).contactInfo?.email?.verificationCode;
     const expiresAt = (user as any).contactInfo?.email
       ?.verificationCodeExpiresAt as Date | undefined;
-    if (!storedCode || storedCode !== otp)
+    if (!storedCode || storedCode === 'USED' || storedCode !== String(otp).trim())
       return res.status(400).json({
         success: false,
         message: 'Invalid verification code',
@@ -609,14 +629,25 @@ export const otpVerifyHandler = async (req: Request, res: Response) => {
         error: 'OTP_EXPIRED',
       });
 
-    (user as any).contactInfo.email.verified = true;
-    (user as any).contactInfo.email.verifiedAt = new Date();
-    (user as any).contactInfo.email.verificationCode = 'USED';
-    (user as any).contactInfo.email.verificationCodeExpiresAt = null;
+    applyEmailVerified(user);
     await user.save();
-    return res
-      .status(200)
-      .json({ success: true, message: 'Email verified successfully' });
+
+    // Verification completes registration: sign the user in
+    const { accessToken, refreshToken } = await issueTokens(res, user);
+    return res.status(200).json({
+      success: true,
+      message: 'Email verified successfully',
+      data: {
+        verified: true,
+        userId: user.userID,
+        email: getStoredEmail(user),
+        displayName: (user as any).name?.displayName,
+        role: user.role,
+        token: accessToken,
+        accessToken,
+        refreshToken,
+      },
+    });
   } catch (error) {
     console.error('OTP verify error:', error);
     return res.status(500).json({
@@ -638,12 +669,7 @@ export const forgotPasswordHandler = async (req: Request, res: Response) => {
         error: 'EMAIL_REQUIRED',
       });
 
-    const user = await UserModel.findOne({
-      $or: [
-        { 'contactInfo.email.value': email },
-        { 'contactInfo.email.email': email },
-      ],
-    });
+    const user = await findUserByEmail(email);
 
     if (!user) {
       return res.status(200).json({
@@ -652,8 +678,20 @@ export const forgotPasswordHandler = async (req: Request, res: Response) => {
       });
     }
 
+    // Requesting a new code must not reset an active lockout
+    if (
+      user.passwordReset?.lockedUntil &&
+      user.passwordReset.lockedUntil > new Date()
+    ) {
+      return res.status(429).json({
+        success: false,
+        message: 'Too many attempts. Try later.',
+        error: 'LOCKED',
+      });
+    }
+
     const otp = generateOTP();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    const expiresAt = new Date(Date.now() + OTP_TTL_MS);
 
     user.passwordReset = {
       ...(user.passwordReset || {}),
@@ -664,7 +702,15 @@ export const forgotPasswordHandler = async (req: Request, res: Response) => {
     } as any;
 
     await user.save();
-    await sendPasswordResetEmail(email, otp);
+    try {
+      await sendPasswordResetEmail(getStoredEmail(user), otp);
+    } catch (emailError) {
+      console.error('Password reset OTP email failed:', emailError);
+      return emailDeliveryFailed(
+        res,
+        'Could not send the reset code. Please try again later.',
+      );
+    }
 
     return res.status(200).json({
       success: true,
@@ -694,12 +740,7 @@ export const passwordResetOtpCheckHandler = async (
         error: 'MISSING_FIELDS',
       });
 
-    const user = await UserModel.findOne({
-      $or: [
-        { 'contactInfo.email.value': email },
-        { 'contactInfo.email.email': email },
-      ],
-    });
+    const user = await findUserByEmail(email);
 
     if (!user || !user.passwordReset?.otp)
       return res.status(400).json({
@@ -762,12 +803,7 @@ export const resetPasswordHandler = async (req: Request, res: Response) => {
         error: 'MISSING_FIELDS',
       });
 
-    const user = await UserModel.findOne({
-      $or: [
-        { 'contactInfo.email.value': email },
-        { 'contactInfo.email.email': email },
-      ],
-    });
+    const user = await findUserByEmail(email);
 
     if (!user || !user.passwordReset?.otp)
       return res.status(400).json({
@@ -823,13 +859,17 @@ export const resetPasswordHandler = async (req: Request, res: Response) => {
     (user as any).password = (user as any).password || {};
     (user as any).password.hashed = hashedPassword;
     (user as any).password.lastChangedAt = new Date();
+    (user as any).passwordChangedAt = new Date();
     user.passwordReset = undefined as any;
+    // The reset code was delivered to this inbox, which proves ownership
+    applyEmailVerified(user);
     await user.save();
-    await sendPasswordChangeNotificationEmail(email);
+    await sendPasswordChangedNotice(getStoredEmail(user));
 
     return res.status(200).json({
       success: true,
       message: 'Password has been reset successfully.',
+      data: { verified: true },
     });
   } catch (error) {
     console.error('Reset password error:', error);
@@ -861,12 +901,7 @@ export const passwordResetRequestHandler = async (
         message: 'Email is required',
         error: 'EMAIL_REQUIRED',
       });
-    const user = await UserModel.findOne({
-      $or: [
-        { 'contactInfo.email.value': email },
-        { 'contactInfo.email.email': email },
-      ],
-    });
+    const user = await findUserByEmail(email);
     if (!user)
       return res.status(200).json({
         success: true,
@@ -895,10 +930,19 @@ export const passwordResetRequestHandler = async (
       lockedUntil: undefined,
     } as any;
     await user.save();
+    const storedEmail = getStoredEmail(user);
     const resetLink = `${FRONTEND_RESET_URL}?token=${rawToken}&email=${encodeURIComponent(
-      email,
+      storedEmail,
     )}`;
-    await sendPasswordResetLinkEmail(email, resetLink);
+    try {
+      await sendPasswordResetLinkEmail(storedEmail, resetLink);
+    } catch (emailError) {
+      console.error('Password reset link email failed:', emailError);
+      return emailDeliveryFailed(
+        res,
+        'Could not send the reset link. Please try again later.',
+      );
+    }
     return res.status(200).json({
       success: true,
       message: 'If the email exists, a reset link has been sent.',
@@ -925,12 +969,7 @@ export const passwordResetValidateHandler = async (
         message: 'Email and token required',
         error: 'MISSING_FIELDS',
       });
-    const user = await UserModel.findOne({
-      $or: [
-        { 'contactInfo.email.value': email },
-        { 'contactInfo.email.email': email },
-      ],
-    });
+    const user = await findUserByEmail(email);
     if (!user || !user.passwordReset?.resetTokenHash)
       return res.status(400).json({
         success: false,
@@ -976,12 +1015,7 @@ export const passwordResetCompleteHandler = async (
         message: 'Email, token, and newPassword required',
         error: 'MISSING_FIELDS',
       });
-    const user = await UserModel.findOne({
-      $or: [
-        { 'contactInfo.email.value': email },
-        { 'contactInfo.email.email': email },
-      ],
-    });
+    const user = await findUserByEmail(email);
     if (!user || !user.passwordReset?.resetTokenHash)
       return res.status(400).json({
         success: false,
@@ -1020,14 +1054,19 @@ export const passwordResetCompleteHandler = async (
       });
     }
     (user as any).password = (user as any).password || {};
+    // Plain text here; the model's pre-save hook hashes it
     (user as any).password.hashed = newPassword;
     (user as any).password.lastChangedAt = new Date();
     user.passwordReset = undefined as any;
+    // The reset link was delivered to this inbox, which proves ownership
+    applyEmailVerified(user);
     await user.save();
-    await sendPasswordChangeNotificationEmail(email);
-    return res
-      .status(200)
-      .json({ success: true, message: 'Password reset successful' });
+    await sendPasswordChangedNotice(getStoredEmail(user));
+    return res.status(200).json({
+      success: true,
+      message: 'Password reset successful',
+      data: { verified: true },
+    });
   } catch (error) {
     console.error('Password reset complete error:', error);
     return res.status(500).json({
@@ -1055,6 +1094,8 @@ export const loginHandler = (
           message: 'Internal server error',
           error: 'INTERNAL_ERROR',
         });
+      if (!user && info?.message === EMAIL_NOT_VERIFIED)
+        return emailNotVerifiedResponse(res, info?.email);
       if (!user)
         return res.status(401).json({
           success: false,
@@ -1137,6 +1178,8 @@ export const loginDashHandler = (
           message: 'Internal server error',
           error: 'INTERNAL_ERROR',
         });
+      if (!user && info?.message === EMAIL_NOT_VERIFIED)
+        return emailNotVerifiedResponse(res, info?.email);
       if (!user)
         return res.status(401).json({
           success: false,
@@ -1233,6 +1276,8 @@ export const refreshHandler = async (req: Request, res: Response) => {
         message: 'User not found',
         error: 'USER_NOT_FOUND',
       });
+    if (!isEmailVerified(user))
+      return emailNotVerifiedResponse(res, getStoredEmail(user));
     const accessToken = generateAccessToken({
       id: user.userID,
       email:

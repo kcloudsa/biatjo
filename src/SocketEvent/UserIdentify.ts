@@ -1,13 +1,19 @@
-import { Server, Socket } from 'socket.io';
+import { Socket } from 'socket.io';
 import { logger } from '../../Utils/Logger';
-import UserModel from '../models/userModel';
+import { loadActiveVerifiedUser, SOCKET_ERRORS } from './socketAuth';
+
+export const DRIVERS_ONLINE_ROOM = 'drivers:online';
 
 export default (socket: Socket) => {
   socket.on(
     'user:identify',
     async (
-      { userId, role }: { userId: string; role: 'driver' | 'rider' },
-      cb?: (res: { success: boolean; error?: string }) => void,
+      { userId, role }: { userId: string; role: 'driver' | 'rider' } = {} as any,
+      cb?: (res: {
+        success: boolean;
+        error?: string;
+        code?: string;
+      }) => void,
     ) => {
       try {
         if (!userId || !role) {
@@ -16,27 +22,49 @@ export default (socket: Socket) => {
           cb?.({ success: false, error: err });
           return;
         }
-
-        // validate user exists
-        const user = await UserModel.findOne({ userID: userId });
-        if (!user) {
-          const err = 'User not found';
-          logger.error(err);
-          cb?.({ success: false, error: err });
+        if (role !== 'driver' && role !== 'rider') {
+          cb?.({ success: false, error: 'role must be "driver" or "rider"' });
           return;
         }
 
-        // store on socket
+        // A socket keeps one identity. Token-authenticated sockets can only
+        // identify as the token's user; others must reconnect to switch user.
+        if (socket.data.userId && socket.data.userId !== userId) {
+          cb?.({
+            success: false,
+            error: 'This connection belongs to another user. Reconnect to switch user.',
+            code: SOCKET_ERRORS.NOT_ALLOWED,
+          });
+          return;
+        }
+
+        const result = await loadActiveVerifiedUser(userId);
+        if (!result.user) {
+          logger.error(`user:identify rejected (${result.code}): ${userId}`);
+          cb?.({ success: false, error: result.error, code: result.code });
+          return;
+        }
+
+        if (role === 'driver' && result.user.role !== 'driver') {
+          cb?.({
+            success: false,
+            error: 'User is not a driver',
+            code: SOCKET_ERRORS.NOT_ALLOWED,
+          });
+          return;
+        }
+
         socket.data.userId = userId;
+        socket.data.accountRole = result.user.role;
         socket.data.role = role; // 'driver' | 'rider'
 
         console.log(
           `User identified: ${userId} as ${role}, socket: ${socket.id}`,
         );
 
-        // put drivers in a drivers room (optional)
+        // Drivers receive trip:new in this room
         if (role === 'driver') {
-          socket.join('drivers_online');
+          socket.join(DRIVERS_ONLINE_ROOM);
         }
 
         cb?.({ success: true });

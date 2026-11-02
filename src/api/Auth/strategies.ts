@@ -9,6 +9,16 @@ import Iuser from '../../interfaces/Iuser';
 import UserModel from '../../models/userModel';
 import { TokenPayload } from '../../../Utils/tokenUtils';
 import { generateOTP, sendVerificationEmail } from '../../emails';
+import {
+  applyEmailVerified,
+  EMAIL_NOT_VERIFIED,
+  getStoredEmail,
+  isEmailVerified,
+  normalizeEmail,
+  OTP_TTL_MS,
+} from '../../lib/emailVerification';
+
+export { EMAIL_NOT_VERIFIED };
 import { Request } from 'express';
 
 let googleStrategyRegistered = false;
@@ -24,6 +34,73 @@ const jwtExtractor = (req: Request) => {
   return token;
 };
 
+const toSessionUser = (user: any) => ({
+  _id: user._id,
+  id: user.userID,
+  email: user.contactInfo?.email?.email || user.contactInfo?.email?.value,
+  name:
+    user.name?.firstName && user.name?.lastName
+      ? `${user.name.firstName} ${user.name.lastName}`.trim()
+      : user.name?.displayName || user.userName?.displayName,
+  role: user.role,
+  profilePicture: user.userInfo?.profilePicture || null,
+});
+
+/** Checks the password; migrates legacy plain-text passwords to bcrypt. */
+const checkPassword = async (user: any, password: string) => {
+  const storedPassword = user?.password?.hashed as string | undefined;
+  if (!storedPassword) return false;
+  if (storedPassword.startsWith('$2')) {
+    try {
+      return await bcrypt.compare(password, storedPassword);
+    } catch {
+      return false;
+    }
+  }
+  // Legacy plain-text password
+  if (storedPassword !== password) return false;
+  try {
+    await UserModel.updateOne(
+      { _id: user._id },
+      { 'password.hashed': await bcrypt.hash(password, 12) },
+    );
+  } catch (migrationError) {
+    console.error('Failed to migrate password for user:', user.userID, migrationError);
+  }
+  return true;
+};
+
+/** Sends a fresh verification code unless a valid one is still pending. */
+const resendVerificationIfNeeded = async (user: any) => {
+  try {
+    const emailInfo = user.contactInfo?.email || {};
+    const hasValidCode =
+      emailInfo.verificationCode &&
+      emailInfo.verificationCode !== 'USED' &&
+      emailInfo.verificationCodeExpiresAt &&
+      new Date(emailInfo.verificationCodeExpiresAt).getTime() > Date.now();
+    if (hasValidCode) return;
+
+    const freshOtp = generateOTP();
+    await UserModel.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          'contactInfo.email.verificationCode': freshOtp,
+          'contactInfo.email.verificationCodeExpiresAt': new Date(
+            Date.now() + OTP_TTL_MS,
+          ),
+        },
+      },
+    );
+    sendVerificationEmail(getStoredEmail(user), freshOtp).catch((err) =>
+      console.error('Resend verification email failed:', err),
+    );
+  } catch (otpErr) {
+    console.error('Email verification resend error:', otpErr);
+  }
+};
+
 export const registerLocalStrategy = (passport: PassportStatic) => {
   passport.use(
     new LocalStrategy(
@@ -33,120 +110,22 @@ export const registerLocalStrategy = (passport: PassportStatic) => {
       },
       async (email: string, password: string, done) => {
         try {
-          const user = (await getUserByEmail(email)) as Iuser | null;
-          if (!user) {
+          const user = (await getUserByEmail(email)) as any;
+          // Same message for unknown email and wrong password (no account probing)
+          if (!user || !(await checkPassword(user, password))) {
             return done(null, false, { message: 'Invalid email or password' });
           }
 
-          const emailInfo: any = user.contactInfo?.email;
-          if (emailInfo && !emailInfo.verified) {
-            try {
-              const needNewCode =
-                !emailInfo.verificationCode ||
-                !emailInfo.verificationCodeExpiresAt ||
-                (emailInfo.verificationCodeExpiresAt &&
-                  new Date(emailInfo.verificationCodeExpiresAt).getTime() <
-                    Date.now());
-              if (needNewCode) {
-                const freshOtp = generateOTP();
-                const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-                await UserModel.updateOne(
-                  {
-                    $or: [
-                      { 'contactInfo.email.value': email },
-                      { 'contactInfo.email.email': email },
-                    ],
-                  },
-                  {
-                    $set: {
-                      'contactInfo.email.verificationCode': freshOtp,
-                      'contactInfo.email.verificationCodeExpiresAt': expiresAt,
-                    },
-                  },
-                );
-                sendVerificationEmail(email, freshOtp).catch((err) =>
-                  console.error('Resend verification email failed:', err),
-                );
-              }
-            } catch (otpErr) {
-              console.error('Email verification resend error:', otpErr);
-            }
-            return done(null, false, { message: 'EMAIL_NOT_VERIFIED' });
+          // Only after the password is correct: block unverified emails
+          if (!isEmailVerified(user)) {
+            await resendVerificationIfNeeded(user);
+            return done(null, false, {
+              message: EMAIL_NOT_VERIFIED,
+              email: getStoredEmail(user),
+            } as any);
           }
 
-          if (user && user.password?.hashed) {
-            const storedPassword = user.password.hashed as string;
-            try {
-              const isPasswordValid = await bcrypt.compare(
-                password,
-                storedPassword,
-              );
-              if (isPasswordValid) {
-                return done(null, {
-                  _id: (user as any)._id,
-                  id: user.userID,
-                  email:
-                    (user as any).contactInfo?.email?.email ||
-                    (user as any).contactInfo?.email?.value,
-                  name:
-                    (user as any).name?.firstName &&
-                    (user as any).name?.lastName
-                      ? `${(user as any).name.firstName} ${
-                          (user as any).name.lastName
-                        }`.trim()
-                      : (user as any).name?.displayName ||
-                        (user as any).userName?.displayName,
-                  role: user.role,
-                  profilePicture:
-                    (user as any).userInfo?.profilePicture || null,
-                });
-              }
-            } catch (_err) {
-              const plainTextMatch = storedPassword === password;
-              if (plainTextMatch) {
-                try {
-                  const hashedPassword = password.startsWith('$2')
-                    ? password
-                    : await bcrypt.hash(password, 12);
-                  await UserModel.updateOne(
-                    {
-                      $or: [
-                        { 'contactInfo.email.value': email },
-                        { 'contactInfo.email.email': email },
-                      ],
-                    },
-                    { 'password.hashed': hashedPassword },
-                  );
-                } catch (migrationError) {
-                  console.error(
-                    'Failed to migrate password for user:',
-                    email,
-                    migrationError,
-                  );
-                }
-                return done(null, {
-                  _id: (user as any)._id,
-                  id: user.userID,
-                  email:
-                    (user as any).contactInfo?.email?.email ||
-                    (user as any).contactInfo?.email?.value,
-                  name:
-                    (user as any).name?.firstName &&
-                    (user as any).name?.lastName
-                      ? `${(user as any).name.firstName} ${
-                          (user as any).name.lastName
-                        }`.trim()
-                      : (user as any).name?.displayName ||
-                        (user as any).userName?.displayName,
-                  role: user.role,
-                  profilePicture:
-                    (user as any).userInfo?.profilePicture || null,
-                });
-              }
-            }
-            return done(null, false, { message: 'Invalid email or password' });
-          }
-          return done(null, false, { message: 'Invalid email or password' });
+          return done(null, toSessionUser(user));
         } catch (error) {
           console.error('Authorization error:', error);
           return done(error);
@@ -166,7 +145,8 @@ export const registerJwtStrategy = (passport: PassportStatic) => {
       async (payload: TokenPayload, done) => {
         try {
           const user = await getUserByEmail(payload.email);
-          if (user) {
+          // Tokens are only valid for users whose email is verified
+          if (user && isEmailVerified(user)) {
             return done(null, {
               _id: (user as any)._id,
               id: user.userID,
@@ -224,7 +204,15 @@ export const registerGoogleStrategy = (passport: PassportStatic) => {
             const email = profile.emails?.[0]?.value;
             if (!email) return done(new Error('No email from Google'), false);
 
+            // Google has verified this address, so it counts as email verification
+            if (profile.emails?.[0]?.verified === false) {
+              return done(null, false, { message: EMAIL_NOT_VERIFIED });
+            }
             let existingUser = await getUserByEmail(email);
+            if (existingUser && !isEmailVerified(existingUser)) {
+              applyEmailVerified(existingUser);
+              await (existingUser as any).save();
+            }
             if (existingUser) {
               return done(null, {
                 _id: (existingUser as any)._id,
@@ -254,19 +242,21 @@ export const registerGoogleStrategy = (passport: PassportStatic) => {
               },
               contactInfo: {
                 email: {
-                  value: email,
+                  value: normalizeEmail(email),
                   verified: true,
                   verifiedAt: new Date(),
-                  verificationCode: 'verified',
+                  verificationCode: null,
+                  verificationCodeExpiresAt: null,
                 },
                 phone: {
-                  countryCode: '+1',
+                  // Placeholder until the user adds a real phone number
                   value: `oauth${Date.now()}${Math.floor(
                     Math.random() * 1000,
                   )}`,
                   verified: false,
                   verifiedAt: null,
-                  verificationCode: '000000',
+                  verificationCode: null,
+                  verificationCodeExpiresAt: null,
                 },
               },
               password: {
@@ -277,12 +267,14 @@ export const registerGoogleStrategy = (passport: PassportStatic) => {
               },
               userInfo: {
                 gender: 'unknown',
-                nationality: 'unknown',
-                profilePicture: profile.photos?.[0]?.value || '',
+                profilePicture: profile.photos?.[0]?.value
+                  ? [profile.photos[0].value]
+                  : [],
               },
               // Align with user model enum
               role: 'user',
               active: true,
+              isVerified: true,
             } as any;
 
             const newUser = await UserModel.create(newUserData);

@@ -115,6 +115,18 @@ curl -X POST http://localhost:3001/auth/register \
   }'
 ```
 
+Registration emails a 6-digit code and does not return tokens yet.
+
+### Verify email
+
+```bash
+curl -X POST http://localhost:3001/auth/otp/verify \
+  -H "Content-Type: application/json" \
+  -d '{ "email": "ahmed@example.com", "otp": "123456" }'
+```
+
+This signs the user in and returns `token` and `refreshToken`. Use `POST /auth/otp/resend` with `{ "email": "..." }` to get a new code. Login returns `403 EMAIL_NOT_VERIFIED` until the email is verified.
+
 ### Login
 
 ```bash
@@ -150,7 +162,7 @@ curl -X POST http://localhost:3001/auth/forgot-password \
   }'
 ```
 
-Then reset the password using the OTP returned by email:
+Then reset the password using the OTP returned by email. A successful reset also marks the email as verified:
 
 ```bash
 curl -X POST http://localhost:3001/auth/reset-password \

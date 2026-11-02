@@ -10,6 +10,23 @@ import { DriverLocationPayload } from './Driver';
 import { logger } from '../../Utils/Logger';
 import { validateBase } from '../validation/offer/index';
 import OfferModel from '../models/offerModel';
+import { notAllowed, requireIdentity } from './socketAuth';
+import { DRIVERS_ONLINE_ROOM } from './UserIdentify';
+
+/** Statuses in which a driver is busy with a trip. */
+const ACTIVE_TRIP_STATUSES = [
+  'accepted',
+  'driver_on_the_way',
+  'driver_arrived',
+  'running',
+];
+/** Statuses only the assigned driver may set through trip:update. */
+const DRIVER_ONLY_STATUSES = [
+  'driver_on_the_way',
+  'driver_arrived',
+  'running',
+  'completed',
+];
 
 // export default (io: Server, socket: Socket) => {
 //   /**
@@ -348,6 +365,7 @@ export default (io: Server, socket: Socket) => {
         cb?.({ success: false, error: err });
         return;
       }
+      if (!requireIdentity(socket, cb, riderId)) return;
       if (
         typeof pickup.lat !== 'number' ||
         typeof pickup.lng !== 'number' ||
@@ -400,7 +418,7 @@ export default (io: Server, socket: Socket) => {
       // rider joins trip room
       socket.join(roomName);
       // notify only drivers interested? (for now broadcast to all drivers)
-      io.to('drivers:online').emit('trip:new', {
+      io.to(DRIVERS_ONLINE_ROOM).emit('trip:new', {
         tripId,
         riderId,
         pickup,
@@ -463,9 +481,10 @@ export default (io: Server, socket: Socket) => {
         })),
       };
 
-      // send to everyone (or to drivers room in future)
-      io.emit('rider:request_trip', payload);
-      console.log('payload', payload);
+      // Requesting rider + online drivers only (was broadcast to every client,
+      // exposing pickup/dropoff to other riders)
+      socket.emit('rider:request_trip', payload);
+      io.to(DRIVERS_ONLINE_ROOM).emit('rider:request_trip', payload);
       cb?.({ success: true, trip, ...payload });
     } catch (err) {
       console.error('Error in rider:request_trip', err);
@@ -490,6 +509,13 @@ export default (io: Server, socket: Socket) => {
         logger.error(err);
         return;
       }
+      if (typeof amount !== 'number' || Number.isNaN(amount) || amount <= 0) {
+        const err = 'amount must be a positive number';
+        cb?.({ success: false, err, error: err });
+        return;
+      }
+      // Only the driver can accept for themselves
+      if (!requireIdentity(socket, cb, driverId)) return;
 
       if (!mongoose.Types.ObjectId.isValid(tripId)) {
         const err = 'Invalid tripId format';
@@ -521,9 +547,14 @@ export default (io: Server, socket: Socket) => {
         logger.error(err);
         return;
       }
+      if (trip.riderId !== riderId) {
+        const err = 'Rider does not match this trip';
+        cb?.({ success: false, err, error: err });
+        return;
+      }
       const notAllow = await Trip.findOne({
         driverId: driverId,
-        status: { $in: ['accepted', 'running', 'started'] },
+        status: { $in: ACTIVE_TRIP_STATUSES },
         _id: { $ne: tripId },
       });
       if (notAllow) {
@@ -604,159 +635,63 @@ export default (io: Server, socket: Socket) => {
     }
   });
   socket.on('trip:start', async (data, cb?: any) => {
+    const { tripId, driverId, riderId, lat, lng } = data || {};
+    const roomName = tripRoom(tripId);
+    // Errors go to the caller; once the caller is confirmed as the trip's
+    // driver they are also shared with the trip room (previous behaviour).
+    const failStart = (err: string, trip?: any, toRoom = false) => {
+      cb?.({ success: false, err, error: err });
+      if (toRoom)
+        io.to(roomName).emit('trip:started', {
+          tripId,
+          driverId,
+          riderId,
+          status: trip?.status ?? null,
+          agreedFare: trip?.fare ?? null,
+          success: false,
+          err,
+        });
+      logger.error(err);
+    };
     try {
-      const { tripId, driverId, riderId, lat, lng } = data || {};
-      const roomName = tripRoom(tripId);
-      socket.join(roomName); // ensure driver joins
-      if (!tripId || !driverId || !riderId || !lat || !lng) {
-        const err = 'tripId, driverId, riderId ,lat and lng are required';
-        cb?.({
-          success: false,
-          err,
-        });
-        io.to(roomName).emit('trip:started', {
-          tripId,
-          driverId,
-          riderId,
-          status: null,
-          agreedFare: null,
-          success: false,
-          err,
-        });
-        logger.error(err);
-        return;
-      }
+      if (
+        !tripId ||
+        !driverId ||
+        !riderId ||
+        typeof lat !== 'number' ||
+        typeof lng !== 'number'
+      )
+        return failStart('tripId, driverId, riderId, lat and lng are required');
 
-      if (!mongoose.Types.ObjectId.isValid(tripId)) {
-        const err = 'Invalid tripId format';
-        cb?.({ success: false, err });
-        logger.error(err);
-        io.to(roomName).emit('trip:started', {
-          tripId,
-          driverId,
-          riderId,
-          status: null,
-          agreedFare: null,
-          success: false,
-          err,
-        });
-        return;
-      }
+      if (!mongoose.Types.ObjectId.isValid(tripId))
+        return failStart('Invalid tripId format');
 
-      const rider = await UserModel.findOne({ userID: riderId });
-      if (!rider) {
-        const err = 'Rider not found';
-        cb?.({ success: false, err });
-        io.to(roomName).emit('trip:started', {
-          tripId,
-          driverId,
-          riderId,
-          status: null,
-          agreedFare: null,
-          success: false,
-          err,
-        });
-        logger.error(err);
-        return;
-      }
-
-      const driver = await Driver.findOne({ driverId });
-      if (!driver) {
-        const err = 'Driver not found';
-        cb?.({ success: false, err });
-        io.to(roomName).emit('trip:started', {
-          tripId,
-          driverId,
-          riderId,
-          status: null,
-          agreedFare: null,
-          success: false,
-          err,
-        });
-        logger.error(err);
-        return;
-      }
+      if (!requireIdentity(socket, cb, driverId)) return;
 
       const trip = await Trip.findById(tripId);
-      if (!trip) {
-        const err = 'Trip not found';
-        cb?.({ success: false, err, trip });
-        io.to(roomName).emit('trip:started', {
-          tripId,
-          driverId,
-          riderId,
-          status: null,
-          agreedFare: null,
-          success: false,
-          err,
-        });
-        logger.error(err);
-        return;
-      }
-      const notAllow = await Trip.findOne({
-        driverId: driverId,
-        status: { $in: ['accepted', 'running', 'started'] },
+      if (!trip) return failStart('Trip not found');
+
+      // Only the driver assigned to this trip can start it
+      if (trip.driverId !== driverId) return notAllowed(cb);
+      if (trip.riderId !== riderId)
+        return failStart('Rider does not match this trip');
+
+      const rider = await UserModel.findOne({ userID: riderId });
+      if (!rider) return failStart('Rider not found', trip, true);
+
+      const driver = await Driver.findOne({ driverId });
+      if (!driver) return failStart('Driver not found', trip, true);
+
+      const busy = await Trip.findOne({
+        driverId,
+        status: { $in: ACTIVE_TRIP_STATUSES },
         _id: { $ne: tripId },
       });
-      if (notAllow) {
-        const err = {
-          success: false,
-          error: `هذا السائق غير متاح حاليا`,
-          trip,
-        };
-        const updatedTrip = await Trip.findOneAndUpdate(
-          {
-            _id: tripId,
-            status: { $in: ['requested', 'negotiating'] },
-            driverId: null,
-          },
-          {
-            $set: {
-              driverId,
-              status: 'accepted',
-              fare: trip.fare,
-              acceptedAt: new Date(),
-            },
-          },
-          { new: true },
-        );
-        if (!updatedTrip) {
-          cb?.({
-            success: false,
-            trip,
-            error: 'Trip already taken or not acceptable',
-          });
-          return;
-        }
+      if (busy) return failStart(`هذا السائق غير متاح حاليا`, trip, true);
 
-        cb?.(err);
-        io.to(roomName).emit('trip:started', {
-          tripId,
-          driverId,
-          riderId,
-          status: trip.status,
-          agreedFare: trip.fare,
-          success: false,
-          err,
-        });
-        return;
-      }
-      if (!['accepted'].includes(trip.status)) {
-        const err = 'Trip cannot be start  in current status';
+      if (!['accepted', 'driver_on_the_way', 'driver_arrived'].includes(trip.status))
+        return failStart('Trip cannot be started in current status', trip, true);
 
-        cb?.(err);
-        io.to(roomName).emit('trip:started', {
-          tripId,
-          driverId,
-          riderId,
-          status: trip.status,
-          agreedFare: trip.fare,
-          success: false,
-          err,
-        });
-        logger.error(err);
-        return;
-      }
       const location = {
         lat,
         lng,
@@ -771,13 +706,14 @@ export default (io: Server, socket: Socket) => {
       await rider.save();
       await trip.save();
 
+      socket.join(roomName); // ensure driver is in the trip room
       io.to(roomName).emit('trip:started', {
         trip,
       });
 
       cb?.({ success: true, trip });
     } catch (err) {
-      console.error('Error in trip:accept', err);
+      console.error('Error in trip:start', err);
       cb?.({ success: false, error: 'Internal server error' });
     }
   });
@@ -800,6 +736,8 @@ export default (io: Server, socket: Socket) => {
         cb?.({ success: false, error: 'Invalid tripId format' });
         return;
       }
+      // Only the rider can cancel their own trip
+      if (!requireIdentity(socket, cb, riderId)) return;
 
       const rider = await UserModel.findOne({ userID: riderId });
       if (!rider) {
@@ -822,14 +760,14 @@ export default (io: Server, socket: Socket) => {
       }
 
       const cancelledTrip = await Trip.findOneAndUpdate(
-        { _id: tripId, riderId, status: { $ne: 'cancelled' } },
+        { _id: tripId, riderId, status: { $nin: ['cancelled', 'completed'] } },
         { $set: { status: 'cancelled' } },
         { new: true },
       );
       if (!cancelledTrip) {
         cb?.({
           success: false,
-          error: 'Trip has already been cancelled in current status',
+          error: 'Trip is already cancelled or completed',
         });
         return;
       }
@@ -845,8 +783,7 @@ export default (io: Server, socket: Socket) => {
         { $set: { runningTrip: null } },
       );
       const roomName = tripRoom(tripId);
-      socket.join(roomName); // ensure driver joins
-      io.to('drivers:online').emit('trip:cancelled', {
+      io.to(DRIVERS_ONLINE_ROOM).emit('trip:cancelled', {
         tripId,
         driverId: cancelledTrip.driverId,
         riderId,
@@ -895,9 +832,29 @@ export default (io: Server, socket: Socket) => {
           cb?.({ success: false, error: 'Invalid status' });
           return;
         }
+        if (!mongoose.Types.ObjectId.isValid(tripId)) {
+          cb?.({ success: false, error: 'Invalid tripId format' });
+          return;
+        }
+
+        const me = requireIdentity(socket, cb);
+        if (!me) return;
+
+        const existing = await Trip.findById(tripId);
+        if (!existing) {
+          cb?.({ success: false, error: 'Trip not found' });
+          return;
+        }
+        // Only the trip's rider or driver can change it; driver progress
+        // statuses can only be set by the assigned driver.
+        const isDriver = !!existing.driverId && existing.driverId === me;
+        const isRider = existing.riderId === me;
+        if (!isDriver && !isRider) return notAllowed(cb);
+        if (DRIVER_ONLY_STATUSES.includes(status) && !isDriver)
+          return notAllowed(cb, 'Only the assigned driver can set this status');
 
         const trip = await Trip.findByIdAndUpdate(
-          { _id: tripId },
+          tripId,
           { $set: { status } },
           { new: true },
         );
@@ -929,12 +886,20 @@ export default (io: Server, socket: Socket) => {
       if (!tripId) {
         cb?.({
           success: false,
-          error: 'tripId are required',
+          error: 'tripId is required',
         });
         return;
       }
+      if (!mongoose.Types.ObjectId.isValid(tripId))
+        return cb?.({ success: false, error: 'Invalid tripId format' });
+
+      const me = requireIdentity(socket, cb);
+      if (!me) return;
+
       const existing = await Trip.findById(tripId);
       if (!existing) return cb?.({ success: false, error: 'Trip not found' });
+      // Only the assigned driver completes the trip
+      if (!existing.driverId || existing.driverId !== me) return notAllowed(cb);
       if (['negotiating', 'requested'].includes(existing.status))
         return cb?.({
           success: false,
@@ -1370,6 +1335,9 @@ export default (io: Server, socket: Socket) => {
         }
 
         // Confirm user exists
+        // Negotiate only as yourself
+        if (!requireIdentity(socket, cb, userId)) return;
+
         const user = await UserModel.findOne({ userID: userId });
         if (!user) {
           const error = 'User not found';
@@ -1589,43 +1557,55 @@ export default (io: Server, socket: Socket) => {
           const riderId = trip.riderId;
           const maxNegotiations = trip.maxNegotiations || 3;
 
-          // Ensure thread exists
-          await Trip.updateOne(
-            {
-              _id: tripId,
-              negotiations: { $not: { $elemMatch: { driverId, riderId } } },
-            },
-            {
-              $push: {
-                negotiations: {
-                  driverId,
-                  riderId,
-                  count: 0,
-                  lastOfferBy: null,
-                  lastAmount: null,
-                  updatedAt: new Date(),
+          // Without an assigned driver there is no rider/driver thread yet:
+          // only update the fare. (Pushing a thread with driverId null made every
+          // later trip.save() fail validation, e.g. in trip:start.)
+          let updated;
+          if (!driverId) {
+            updated = await Trip.findOneAndUpdate(
+              { _id: tripId, status: { $in: ['requested', 'negotiating'] } },
+              { $set: { fare: amount, status: 'negotiating' } },
+              { new: true },
+            );
+          } else {
+            // Ensure thread exists
+            await Trip.updateOne(
+              {
+                _id: tripId,
+                negotiations: { $not: { $elemMatch: { driverId, riderId } } },
+              },
+              {
+                $push: {
+                  negotiations: {
+                    driverId,
+                    riderId,
+                    count: 0,
+                    lastOfferBy: null,
+                    lastAmount: null,
+                    updatedAt: new Date(),
+                  },
                 },
               },
-            },
-          );
+            );
 
-          // Update last offer info WITHOUT incrementing count
-          const updated = await Trip.findOneAndUpdate(
-            { _id: tripId, status: { $in: ['requested', 'negotiating'] } },
-            {
-              $set: {
-                'negotiations.$[t].lastOfferBy': 'rider',
-                'negotiations.$[t].lastAmount': amount,
-                'negotiations.$[t].updatedAt': new Date(),
-                fare: amount,
-                status: 'negotiating',
+            // Update last offer info WITHOUT incrementing count
+            updated = await Trip.findOneAndUpdate(
+              { _id: tripId, status: { $in: ['requested', 'negotiating'] } },
+              {
+                $set: {
+                  'negotiations.$[t].lastOfferBy': 'rider',
+                  'negotiations.$[t].lastAmount': amount,
+                  'negotiations.$[t].updatedAt': new Date(),
+                  fare: amount,
+                  status: 'negotiating',
+                },
               },
-            },
-            {
-              new: true,
-              arrayFilters: [{ 't.driverId': driverId, 't.riderId': riderId }],
-            },
-          );
+              {
+                new: true,
+                arrayFilters: [{ 't.driverId': driverId, 't.riderId': riderId }],
+              },
+            );
+          }
 
           const thread = updated?.negotiations?.find(
             (n: any) => n.driverId === driverId && n.riderId === riderId,
@@ -1677,6 +1657,12 @@ export default (io: Server, socket: Socket) => {
         return;
       }
 
+      if (!mongoose.Types.ObjectId.isValid(tripId)) {
+        cb?.({ success: false, error: 'Invalid tripId format' });
+        return;
+      }
+      if (!requireIdentity(socket, cb, driverId)) return;
+
       const driver = await Driver.findOne({ driverId });
       if (!driver) {
         const err = 'Driver not found';
@@ -1711,7 +1697,7 @@ export default (io: Server, socket: Socket) => {
             lastOnlineAt: new Date(),
           },
         },
-        { upsert: true, new: true },
+        { new: true },
       );
       const location = {
         lat,
@@ -1719,8 +1705,10 @@ export default (io: Server, socket: Socket) => {
         updatedAt: new Date(),
       };
       // optionally attach last driver location to trip
-      const trip = await Trip.findByIdAndUpdate(
-        { _id: tripId, driverId },
+      // Only the trip's assigned driver, and only while the trip is active.
+      // (findByIdAndUpdate ignored the driverId condition.)
+      const trip = await Trip.findOneAndUpdate(
+        { _id: tripId, driverId, status: { $in: ACTIVE_TRIP_STATUSES } },
         {
           $set: {
             lastDriverLocation: location,
@@ -1734,7 +1722,7 @@ export default (io: Server, socket: Socket) => {
         },
       );
       if (!trip) {
-        const err = 'trip not found';
+        const err = 'Trip not found, not assigned to this driver, or not active';
         logger.error(err);
         io.to(`trip:${tripId}`).emit('trip:location:update', {
           success: false,
@@ -1798,6 +1786,10 @@ export default (io: Server, socket: Socket) => {
         }
 
         // ── load trip ──
+        // The sender must be the side they claim to be
+        if (!requireIdentity(socket, cb, role === 'driver' ? driverId : riderId))
+          return;
+
         const trip = await Trip.findById(tripId);
         if (!trip) {
           cb?.({ success: false, error: 'Trip not found' });
@@ -1807,6 +1799,11 @@ export default (io: Server, socket: Socket) => {
           });
           return;
         }
+
+        if (trip.riderId !== riderId)
+          return notAllowed(cb, 'Rider does not match this trip');
+        if (role === 'driver' && !(await Driver.exists({ driverId })))
+          return notAllowed(cb, 'Driver not found');
 
         if (!['requested', 'negotiating'].includes(trip.status)) {
           cb?.({
@@ -1911,6 +1908,13 @@ export default (io: Server, socket: Socket) => {
           return;
         }
 
+        const me = requireIdentity(socket, cb, userId);
+        if (!me) return;
+        if (!mongoose.Types.ObjectId.isValid(offerId)) {
+          cb?.({ success: false, error: 'Invalid offerId format' });
+          return;
+        }
+
         const offer = await OfferModel.findById(offerId);
         if (!offer) {
           cb?.({ success: false, error: 'Offer not found' });
@@ -1918,17 +1922,10 @@ export default (io: Server, socket: Socket) => {
         }
 
         // Only the offer creator (driverId or riderId matching their role) may cancel
-        // const isOwner =
-        // (offer.role === 'driver' && offer.driverId === userId)
-        //     ||(offer.role === 'rider' && offer.riderId === userId);
-
-        // if (!isOwner) {
-        //   cb?.({
-        //     success: false,
-        //     error: 'Not authorized to cancel this offer',
-        //   });
-        //   return;
-        // }
+        const isOwner =
+          (offer.role === 'driver' && offer.driverId === me) ||
+          (offer.role === 'rider' && offer.riderId === me);
+        if (!isOwner) return notAllowed(cb, 'Not authorized to cancel this offer');
 
         if (offer.status !== 'negotiating') {
           cb?.({
@@ -1985,6 +1982,13 @@ export default (io: Server, socket: Socket) => {
           return;
         }
 
+        const me = requireIdentity(socket, cb, userId);
+        if (!me) return;
+        if (!mongoose.Types.ObjectId.isValid(offerId)) {
+          cb?.({ success: false, error: 'Invalid offerId format' });
+          return;
+        }
+
         const offer = await OfferModel.findById(offerId);
         if (!offer) {
           cb?.({ success: false, error: 'Offer not found' });
@@ -2002,22 +2006,14 @@ export default (io: Server, socket: Socket) => {
         // The *counter-party* accepts:
         //   driver offer → rider accepts  (userId === riderId)
         //   rider  offer → driver accepts (userId === driverId)
-        // const isCounterParty =
-        //   (offer.role === 'driver' && offer.riderId === userId) ||
-        //   (offer.role === 'rider' && offer.driverId === userId);
-
-        // if (!isCounterParty) {
-        //   cb?.({
-        //     success: false,
-        //     error: 'Not authorized to accept this offer',
-        //   });
-        //   return;
-        // }
+        const isCounterParty =
+          (offer.role === 'driver' && offer.riderId === me) ||
+          (offer.role === 'rider' && offer.driverId === me);
+        if (!isCounterParty)
+          return notAllowed(cb, 'Not authorized to accept this offer');
         const notAllow = await Trip.findOne({
           driverId: offer.driverId,
-          status: {
-            $in: ['accepted', 'driver_on_the_way', 'running', 'driver_arrived'],
-          },
+          status: { $in: ACTIVE_TRIP_STATUSES },
         });
         if (notAllow) {
           cb?.({

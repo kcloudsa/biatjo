@@ -1,3 +1,8 @@
+import {
+  emailFilter,
+  findUserByEmail,
+  normalizeEmail,
+} from '../../lib/emailVerification';
 import { createUserSchema } from '../../validation/user/schema';
 import Iuser, {
   IContactInfo,
@@ -37,10 +42,7 @@ export const createUser = asyncHandler(async (req: Request, res: Response) => {
     const data = parsed.data; // Now fully typed and safe!
     // Check if user already exists
     const existingUser = await UserModel.findOne({
-      $or: [
-        { 'contactInfo.email.value': data.contactInfo.email.email },
-        { 'contactInfo.email.email': data.contactInfo.email.email },
-      ],
+      ...emailFilter(data.contactInfo.email.email),
       'contactInfo.phone.value': data.contactInfo.phone.phoneNumber,
     });
     if (existingUser) {
@@ -66,7 +68,7 @@ export const createUser = asyncHandler(async (req: Request, res: Response) => {
       } as IUserName,
       contactInfo: {
         email: {
-          value: data.contactInfo.email.email,
+          value: normalizeEmail(data.contactInfo.email.email),
           verified: data.contactInfo.email.verified,
           verifiedAt: (data.contactInfo.email.verifiedAt as any) ?? null,
           verificationCode: data.contactInfo.email.verificationCode,
@@ -88,6 +90,7 @@ export const createUser = asyncHandler(async (req: Request, res: Response) => {
         nationality: data.userInfo.nationality,
         profilePicture: data.userInfo.profilePicture || [],
       } as IUserTInfo,
+      isVerified: data.contactInfo.email.verified === true,
       active: data.active ?? true,
       role: data.role as any,
       subUsersIDs:
@@ -344,12 +347,8 @@ export const deleteUser = asyncHandler(async (req: Request, res: Response) => {
 
 export const getUserByEmail = async (email: string): Promise<Iuser | null> => {
   try {
-    const user = await UserModel.findOne({
-      $or: [
-        { 'contactInfo.email.value': email },
-        { 'contactInfo.email.email': email },
-      ],
-    });
+    // Case-insensitive match so "Ahmed@x.com" and "ahmed@x.com" are the same user
+    const user = await findUserByEmail(email);
     return user; // null if not found
   } catch (error) {
     console.error('Error fetching user by email:', error);

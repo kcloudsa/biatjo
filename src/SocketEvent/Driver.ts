@@ -3,6 +3,8 @@ import { logger } from '../../Utils/Logger';
 import { Driver } from '../models/DriverModel';
 import { Trip } from '../models/TripModel';
 import UserModel from '../models/userModel';
+import { requireIdentity } from './socketAuth';
+import { DRIVERS_ONLINE_ROOM } from './UserIdentify';
 interface DriverOnlinePayload {
   driverId: string;
   lat: number;
@@ -30,6 +32,7 @@ export default (io: Server, socket: Socket) => {
         cb?.({ success: false, error: err });
         return;
       }
+      if (!requireIdentity(socket, cb, driverId)) return;
 
       const user = await UserModel.findOne({ userID: driverId });
       if (!user) {
@@ -64,9 +67,8 @@ export default (io: Server, socket: Socket) => {
         { new: true },
       );
 
-      // put this socket in a driver-specific room (optional)
-      // socket.join(`driver:${driverId}`);
-      socket.join(`drivers:online`);
+      // Online drivers receive trip:new
+      socket.join(DRIVERS_ONLINE_ROOM);
 
       logger.info(`SOCKET driver online: ${driverId}`);
       io.emit('driver:online', { driverId, lat, lng, updatedAt: new Date() });
@@ -87,6 +89,7 @@ export default (io: Server, socket: Socket) => {
         cb?.({ success: false, error: err });
         return;
       }
+      if (!requireIdentity(socket, cb, driverId)) return;
 
       const user = await UserModel.findOne({ userID: driverId });
       if (!user) {
@@ -121,15 +124,15 @@ export default (io: Server, socket: Socket) => {
         { new: true },
       );
 
-      // remove this socket in a driver-specific room (optional)
-      socket.leave(`driver:${driverId}`);
+      // Offline drivers stop receiving trip:new
+      socket.leave(DRIVERS_ONLINE_ROOM);
 
       logger.info(`SOCKET driver offline: ${driverId}`);
       io.emit('driver:offline', { driverId, lat, lng, updatedAt: new Date() });
 
       cb?.({ success: true, driver });
     } catch (err) {
-      logger.error('Error in socket driver:online', err as any);
+      logger.error('Error in socket driver:offline', err as any);
       cb?.({ success: false, error: 'Internal server error' });
     }
   });
@@ -145,45 +148,20 @@ export default (io: Server, socket: Socket) => {
         const err = 'driverId, lat (number), lng (number) are required';
         logger.error(err);
         cb?.({ success: false, error: err });
-        // io.to(`drivers:online`).emit('driver:location:update', {
-        io.emit('driver:location:update', {
-          driverId,
-          lat,
-          lng,
-          success: false,
-          error: err,
-          updatedAt: new Date(),
-        });
         return;
       }
+      if (!requireIdentity(socket, cb, driverId)) return;
       const driver = await Driver.findOne({ driverId });
       if (!driver) {
         const err = 'Driver not found';
         logger.error(err);
         cb?.({ success: false, error: err });
-        // io.to(`drivers:online`).emit('driver:location:update', {
-        io.emit('driver:location:update', {
-          driverId,
-          lat,
-          lng,
-          success: false,
-          error: err,
-          updatedAt: new Date(),
-        });
         return;
       }
       if (!driver?.online) {
         const err = 'Driver not online';
         logger.error(err);
         cb?.({ success: false, error: err });
-        io.emit('driver:location:update', {
-          driverId,
-          lat,
-          lng,
-          success: false,
-          error: err,
-          updatedAt: new Date(),
-        });
         return;
       }
       await Driver.findOneAndUpdate(
@@ -196,7 +174,7 @@ export default (io: Server, socket: Socket) => {
             lastOnlineAt: new Date(),
           },
         },
-        { upsert: true, new: true },
+        { new: true },
       );
 
       logger.info(`SOCKET driver location: ${driverId},  ${lat}, ${lng}`);
