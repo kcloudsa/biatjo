@@ -1,11 +1,12 @@
 import nodemailer, { Transporter } from 'nodemailer';
 
-const hasSmtp = Boolean(process.env.EMAIL_USER && process.env.EMAIL_PASS);
 const hasResend = Boolean(process.env.RESEND_API_KEY);
+const hasSmtp = Boolean(process.env.EMAIL_USER && process.env.EMAIL_PASS);
+const useGmailSmtp = hasSmtp && !hasResend;
 
 let transporter: Transporter;
 
-if (hasSmtp) {
+if (useGmailSmtp) {
   transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
     port: 465,
@@ -25,7 +26,7 @@ if (hasSmtp) {
   transporter = nodemailer.createTransport({ jsonTransport: true });
 }
 
-if (hasSmtp) {
+if (useGmailSmtp) {
   void transporter
     .verify()
     .then(() => console.log('Gmail SMTP email delivery is ready.'))

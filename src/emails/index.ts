@@ -57,16 +57,6 @@ const sendEmail = async (
   html: string,
 ): Promise<SendResult> => {
   try {
-    if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-      const result = await transporter.sendMail({
-        from: `Byatjo <${getMailerUser()}>`,
-        to,
-        subject,
-        html,
-      });
-      return result as SendResult;
-    }
-
     if (process.env.RESEND_API_KEY) {
       const from = process.env.EMAIL_FROM;
       if (!from) {
@@ -97,6 +87,16 @@ const sendEmail = async (
       }
 
       return { messageId: result.id, response: `HTTP ${response.status}` };
+    }
+
+    if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+      const result = await transporter.sendMail({
+        from: `Byatjo <${getMailerUser()}>`,
+        to,
+        subject,
+        html,
+      });
+      return result as SendResult;
     }
 
     if (
