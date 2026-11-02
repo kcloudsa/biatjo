@@ -57,6 +57,16 @@ const sendEmail = async (
   html: string,
 ): Promise<SendResult> => {
   try {
+    if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+      const result = await transporter.sendMail({
+        from: `Byatjo <${getMailerUser()}>`,
+        to,
+        subject,
+        html,
+      });
+      return result as SendResult;
+    }
+
     if (process.env.RESEND_API_KEY) {
       const from = process.env.EMAIL_FROM;
       if (!from) {
@@ -98,13 +108,9 @@ const sendEmail = async (
       );
     }
 
-    const result = await transporter.sendMail({
-      from: `Byatjo <${getMailerUser()}>`,
-      to,
-      subject,
-      html,
-    });
-    return result as SendResult;
+    throw new Error(
+      'Email delivery is not configured. Set EMAIL_USER and EMAIL_PASS for Gmail SMTP, or RESEND_API_KEY and EMAIL_FROM for Resend.',
+    );
   } catch (err) {
     console.error(`Email send failed (${subject}) to ${to}:`, err);
     throw err;

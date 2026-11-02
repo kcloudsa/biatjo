@@ -1,34 +1,39 @@
 import nodemailer, { Transporter } from 'nodemailer';
 
-const hasResend = Boolean(process.env.RESEND_API_KEY);
 const hasSmtp = Boolean(process.env.EMAIL_USER && process.env.EMAIL_PASS);
+const hasResend = Boolean(process.env.RESEND_API_KEY);
 
 let transporter: Transporter;
 
-if (hasSmtp && !hasResend) {
+if (hasSmtp) {
   transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true,
     auth: {
       user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
+      pass: process.env.EMAIL_PASS?.replace(/\s+/g, ''),
     },
     pool: true,
     maxConnections: 5,
     maxMessages: 50,
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 30000,
   });
 } else {
   transporter = nodemailer.createTransport({ jsonTransport: true });
 }
 
-if (hasResend) {
-  console.log('Email delivery configured with Resend HTTP API.');
-} else if (hasSmtp) {
+if (hasSmtp) {
   void transporter
     .verify()
-    .then(() => console.log('Nodemailer SMTP transporter is ready.'))
+    .then(() => console.log('Gmail SMTP email delivery is ready.'))
     .catch((error) =>
-      console.error('Nodemailer SMTP transporter verification failed:', error),
+      console.error('Gmail SMTP transporter verification failed:', error),
     );
+} else if (hasResend) {
+  console.log('Email delivery configured with Resend HTTP API.');
 } else {
   console.warn(
     process.env.NODE_ENV === 'production'
