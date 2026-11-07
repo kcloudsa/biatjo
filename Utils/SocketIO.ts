@@ -6,6 +6,10 @@ import driverEvents from '../src/SocketEvent/Driver';
 import riderEvents from '../src/SocketEvent/Rider';
 import joinEvents from '../src/SocketEvent/Join';
 import tripEvents from '../src/SocketEvent/Trip';
+import {
+  startScheduledTripPromoter,
+  syncUserTrips,
+} from '../src/SocketEvent/scheduledTrips';
 import userIdentifyEvents from '../src/SocketEvent/UserIdentify';
 import { socketAuthMiddleware } from '../src/SocketEvent/socketAuth';
 import {
@@ -32,10 +36,20 @@ export const setupSocket = (httpServer: HttpServer, app: Express) => {
   // Make io available everywhere via req.app.get('io')
   app.set('io', io);
 
+  // Moves 'scheduled' trips to 'accepted' 10 minutes before tripTime
+  startScheduledTripPromoter(io);
+
   // Binds the user from handshake auth.token (see src/SocketEvent/socketAuth.ts)
   io.use(socketAuthMiddleware);
   io.on('connection', (socket) => {
     console.log('⚡ User connected:', socket.id);
+    // Token-authenticated: rejoin trip rooms and send current trip state
+    // (anything missed while offline). Legacy clients sync on user:identify.
+    if (socket.data.userId) {
+      syncUserTrips(socket, socket.data.userId).catch((err) =>
+        console.error('Error syncing user trips', err),
+      );
+    }
     //    const userId = socket.handshake.auth?.userId as string | undefined;
     // if (userId) {
     //   userLastSeen.set(userId, Date.now());

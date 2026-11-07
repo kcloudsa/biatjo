@@ -1,6 +1,7 @@
 import { Socket } from 'socket.io';
 import { logger } from '../../Utils/Logger';
 import { loadActiveVerifiedUser, SOCKET_ERRORS } from './socketAuth';
+import { syncUserTrips } from './scheduledTrips';
 
 export const DRIVERS_ONLINE_ROOM = 'drivers:online';
 
@@ -68,6 +69,10 @@ export default (socket: Socket) => {
         }
 
         cb?.({ success: true });
+
+        // Rejoin trip rooms and send the current state of scheduled/active
+        // trips, so a status change made while offline is not missed.
+        await syncUserTrips(socket, userId);
       } catch (e) {
         logger.error('Error in user:identify', e as any);
         cb?.({ success: false, error: 'Internal server error' });

@@ -4,6 +4,9 @@ import { CarKindEnum, TransPortTypeEnum } from './ICar';
 export type TripStatus =
   | 'requested'
   | 'negotiating'
+  // Accepted scheduled trip whose tripTime is more than 10 minutes away.
+  // Does not make the driver busy; promoted to 'accepted' automatically.
+  | 'scheduled'
   | 'accepted'
   | 'driver_on_the_way'
   | 'driver_arrived'

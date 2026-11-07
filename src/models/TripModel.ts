@@ -47,6 +47,7 @@ const TripSchema = new Schema<ITrip>(
       type: String,
       enum: [
         'requested',
+        'scheduled',
         'accepted',
         'negotiating',
         'driver_on_the_way',
@@ -95,5 +96,8 @@ const TripSchema = new Schema<ITrip>(
     timestamps: true, // adds createdAt & updatedAt
   },
 );
+
+// Used by the scheduled-trip promoter (status: 'scheduled', tripTime <= x)
+TripSchema.index({ status: 1, tripTime: 1 });
 
 export const Trip = model<ITrip>('Trip', TripSchema);

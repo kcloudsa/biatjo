@@ -1,4 +1,6 @@
 export const tripRoom = (tripId: string) => `trip:${tripId}`;
+/** Personal room of a user (all their sockets), joined on connect / identify. */
+export const userRoom = (userId: string) => `user:${userId}`;
 type TripRole = 'rider' | 'driver';
 
 type MemberInfo = {

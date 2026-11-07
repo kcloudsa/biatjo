@@ -38,6 +38,8 @@ Set `SOCKET_REQUIRE_AUTH=true` on the server once all apps send the token. Witho
 | `trip:join`, `trip:leave` | The user themself (`userId`). Riders join only their own trips; drivers join open trips or trips assigned to them. |
 | `trip:accept` | The driver themself; `riderId` must be the trip's rider |
 | `trip:start` | The trip's assigned driver; `riderId` must be the trip's rider. Allowed from `accepted`, `driver_on_the_way` or `driver_arrived`. |
+| `trip:accept` / `offer:accept` (scheduled) | If the trip has `isScheduled: true` and `tripTime` is more than 10 minutes away, it is accepted with status `scheduled`, which does not make the driver busy. `tripTime` may be sent in epoch ms or seconds; it is stored in ms. A driver cannot accept a scheduled trip that starts within 60 minutes of another of their scheduled trips. The server moves it to `accepted` automatically 10 minutes before `tripTime` and emits `trip:update` and `trip:scheduled_due` to the trip room and to the rider's and driver's personal rooms (`user:<userId>`). |
+| `trip:sync` (server → client) | Sent on connect (token auth) or after `user:identify`: `{ userId, trips }` with all of the user's `scheduled` and active trips. The socket also rejoins those trip rooms. Use it to refresh state after reconnecting. |
 | `trip:update` | The trip's rider or assigned driver. Only the driver may set `driver_on_the_way`, `driver_arrived`, `running` or `completed`. |
 | `trip:completed` | The trip's assigned driver |
 | `trip:cancel` | The trip's rider. Completed trips cannot be cancelled. |

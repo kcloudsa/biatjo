@@ -13,13 +13,14 @@ import OfferModel from '../models/offerModel';
 import { notAllowed, requireIdentity } from './socketAuth';
 import { DRIVERS_ONLINE_ROOM } from './UserIdentify';
 
-/** Statuses in which a driver is busy with a trip. */
-const ACTIVE_TRIP_STATUSES = [
-  'accepted',
-  'driver_on_the_way',
-  'driver_arrived',
-  'running',
-];
+import {
+  ACTIVE_TRIP_STATUSES,
+  findScheduleConflict,
+  normalizeTripTime,
+  SCHEDULE_CONFLICT_ERROR,
+  statusOnAccept,
+} from './scheduledTrips';
+
 /** Statuses only the assigned driver may set through trip:update. */
 const DRIVER_ONLY_STATUSES = [
   'driver_on_the_way',
@@ -356,13 +357,22 @@ export default (io: Server, socket: Socket) => {
         carKind,
         transportType,
         isScheduled,
-        tripTime,
+        tripTime: rawTripTime,
       } = data || {};
 
       if (!riderId || !pickup || !dropoff) {
         const err = 'riderId, pickup, dropoff are required';
         console.log(err, data);
         cb?.({ success: false, error: err });
+        return;
+      }
+      // Stored as epoch ms whether the app sends ms or seconds
+      const tripTime = normalizeTripTime(rawTripTime);
+      if (isScheduled && tripTime === undefined) {
+        cb?.({
+          success: false,
+          error: 'tripTime (epoch ms) is required when isScheduled is true',
+        });
         return;
       }
       if (!requireIdentity(socket, cb, riderId)) return;
@@ -552,17 +562,27 @@ export default (io: Server, socket: Socket) => {
         cb?.({ success: false, err, error: err });
         return;
       }
-      const notAllow = await Trip.findOne({
-        driverId: driverId,
-        status: { $in: ACTIVE_TRIP_STATUSES },
-        _id: { $ne: tripId },
-      });
-      if (notAllow) {
-        cb?.({
-          success: false,
-          error: `هذا السائق غير متاح حاليا`,
-          trip,
+      // A trip parked as 'scheduled' does not occupy the driver now, so
+      // accepting it is allowed even while the driver is on another trip.
+      const nextStatus = statusOnAccept(trip);
+      if (nextStatus === 'accepted') {
+        const notAllow = await Trip.findOne({
+          driverId: driverId,
+          status: { $in: ACTIVE_TRIP_STATUSES },
+          _id: { $ne: tripId },
         });
+        if (notAllow) {
+          cb?.({
+            success: false,
+            error: `هذا السائق غير متاح حاليا`,
+            trip,
+          });
+          return;
+        }
+      }
+      // A driver can't hold two scheduled trips at (about) the same time
+      if (trip.isScheduled && (await findScheduleConflict(driverId, trip))) {
+        cb?.({ success: false, error: SCHEDULE_CONFLICT_ERROR, trip });
         return;
       }
       if (!['requested', 'negotiating'].includes(trip.status)) {
@@ -584,7 +604,7 @@ export default (io: Server, socket: Socket) => {
         {
           $set: {
             driverId,
-            status: 'accepted',
+            status: nextStatus,
             fare: amount,
             acceptedAt: new Date(),
           },
@@ -900,7 +920,7 @@ export default (io: Server, socket: Socket) => {
       if (!existing) return cb?.({ success: false, error: 'Trip not found' });
       // Only the assigned driver completes the trip
       if (!existing.driverId || existing.driverId !== me) return notAllowed(cb);
-      if (['negotiating', 'requested'].includes(existing.status))
+      if (['negotiating', 'requested', 'scheduled'].includes(existing.status))
         return cb?.({
           success: false,
           error: 'هذه الرحله لم تبدا بعد',
@@ -2011,22 +2031,36 @@ export default (io: Server, socket: Socket) => {
           (offer.role === 'rider' && offer.driverId === me);
         if (!isCounterParty)
           return notAllowed(cb, 'Not authorized to accept this offer');
-        const notAllow = await Trip.findOne({
-          driverId: offer.driverId,
-          status: { $in: ACTIVE_TRIP_STATUSES },
-        });
-        if (notAllow) {
-          cb?.({
-            success: false,
-            error: `هذا السائق غير متاح حاليا`,
-            offer,
-          });
-          return;
-        }
         const trip = await Trip.findById(offer.tripId);
 
         if (!trip) {
           cb?.({ success: false, error: 'Trip not found', trip });
+          return;
+        }
+        // Scheduled trips far in the future don't make the driver busy now
+        const nextStatus = statusOnAccept(trip);
+        if (nextStatus === 'accepted') {
+          const notAllow = await Trip.findOne({
+            driverId: offer.driverId,
+            status: { $in: ACTIVE_TRIP_STATUSES },
+            _id: { $ne: trip._id },
+          });
+          if (notAllow) {
+            cb?.({
+              success: false,
+              error: `هذا السائق غير متاح حاليا`,
+              offer,
+            });
+            return;
+          }
+        }
+        // A driver can't hold two scheduled trips at (about) the same time
+        if (
+          trip.isScheduled &&
+          offer.driverId &&
+          (await findScheduleConflict(offer.driverId, trip))
+        ) {
+          cb?.({ success: false, error: SCHEDULE_CONFLICT_ERROR, offer });
           return;
         }
         if (trip.status == 'cancelled') {
@@ -2059,7 +2093,7 @@ export default (io: Server, socket: Socket) => {
           {
             $set: {
               driverId: offer.driverId,
-              status: 'accepted',
+              status: nextStatus,
               fare: offer.amount,
               acceptedAt: new Date(),
             },
@@ -2085,7 +2119,7 @@ export default (io: Server, socket: Socket) => {
             {
               _id: updatedTrip._id,
               driverId: offer.driverId,
-              status: 'accepted',
+              status: updatedTrip.status,
             },
             {
               $set: { driverId: null, status: trip.status, fare: trip.fare },

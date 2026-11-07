@@ -16,6 +16,12 @@ import { optionalAuthenticateJWT } from '../src/services/historyServices';
 
 // IMPORTANT: align with socket code
 import { tripRoom } from '../src/SocketEvent/Rooms';
+import {
+  findScheduleConflict,
+  normalizeTripTime,
+  SCHEDULE_CONFLICT_ERROR,
+  statusOnAccept,
+} from '../src/SocketEvent/scheduledTrips';
 
 const router = Router();
 
@@ -181,7 +187,7 @@ router.post(
         carKind,
         transportType,
         isScheduled,
-        tripTime,
+        tripTime: rawTripTime,
       } = req.body;
 
       if (!riderId || !pickup || !dropoff) {
@@ -219,9 +225,11 @@ router.post(
       const io = getIO(req);
 
       const startingFare = typeof initialFare === 'number' ? initialFare : 0;
-      if (isScheduled && tripTime == 0) {
+      // Stored as epoch ms whether the app sends ms or seconds
+      const tripTime = normalizeTripTime(rawTripTime);
+      if (isScheduled && tripTime === undefined) {
         return res
-          .status(404)
+          .status(400)
           .json({ error: 'when trip isScheduled ,its tripTime is required ' });
       }
       const trip = await Trip.create({
@@ -356,8 +364,12 @@ router.post(
         });
       }
 
+      if (trip.isScheduled && (await findScheduleConflict(driverId, trip))) {
+        return res.status(409).json({ error: SCHEDULE_CONFLICT_ERROR });
+      }
+
       trip.driverId = driverId;
-      trip.status = 'accepted';
+      trip.status = statusOnAccept(trip);
       if (trip.fare !== amount) trip.fare = amount;
 
       await trip.save();
